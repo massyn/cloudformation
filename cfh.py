@@ -1,8 +1,7 @@
 import json
-from re import M
-import sys
 import os
 import argparse
+import boto3
 
 # =========================== Parameter Templates ===========================
 
@@ -13,25 +12,10 @@ def parameter_LatestAmiId():
         "Description" : "Path to the SSM Parameter that contains the latest Amazon Linux 2 image ID"
     }
 
-def parameter_SecurityGroup():
+def parameter_String(desc):
     return {
-        "Type" : "AWS::EC2::SecurityGroup::Id",
-        "Description" : "Select a security group"
-    }
-
-def parameter_Subnets():
-    return {
-        "Type": "List<AWS::EC2::Subnet::Id>"
-    }
-
-def parameter_Subnet():
-    return {
-        "Type": "AWS::EC2::Subnet::Id"
-    }
-
-def parameter_vpc():
-    return {
-        "Type" : "AWS::EC2::VPC::Id"
+        "Type" : "String",
+        "Description" : desc
     }
 
 # =========================== Resource Templates ===========================
@@ -74,7 +58,7 @@ def resource_ec2Role():
         }
     }
 
-def resource_ec2Instance(IamInstanceProfile,ImageId,SecurityGroup, Subnet):
+def resource_ec2Instance(name,IamInstanceProfile,ImageId,SecurityGroup, Subnet):
     return {
         "Type" : "AWS::EC2::Instance",
         "Properties" : {
@@ -82,7 +66,7 @@ def resource_ec2Instance(IamInstanceProfile,ImageId,SecurityGroup, Subnet):
             "IamInstanceProfile"    : { "Ref" : IamInstanceProfile },
             "InstanceType" : "t2.micro",
             "NetworkInterfaces": [ {
-                "AssociatePublicIpAddress": "true",
+                #"AssociatePublicIpAddress": "true",
                 "DeviceIndex": "0",
                 "GroupSet": [{ "Ref" : SecurityGroup }],
                 "SubnetId": { "Ref" : Subnet }
@@ -96,6 +80,12 @@ def resource_ec2Instance(IamInstanceProfile,ImageId,SecurityGroup, Subnet):
                 },
                 "DeviceName": "/dev/xvda",
             }],
+            "Tags" : [
+                {
+                "Key" : "Name",
+                "Value" : name
+                }
+            ],
             "UserData"              : { "Fn::Base64" : { "Fn::Join" : ["\n", [
                     "#!/usr/bin/bash",
                     "yum update -y"
@@ -148,6 +138,28 @@ def resource_ec2LaunchTemplate(name,IamInstanceProfile,ImageId,SecurityGroup):
         ]
     }
 
+def resource_eip():
+    return  {
+        "Type" : "AWS::EC2::EIP",
+        "Properties" : {
+            "Domain" : "vpc"
+        }
+    }
+
+def resource_eventbridge_schedule(name,cron):
+    return {
+    "Type": "AWS::Events::Rule",
+    "Properties": {
+        "Description": f"Scheduled event to trigger the Lambda function {name}",
+        "ScheduleExpression" : cron,
+        "State": "ENABLED",
+        "Targets": [{ 
+            "Arn": { "Fn::GetAtt": [ name, "Arn" ] },
+            "Id" : { "Fn::Sub": f"${{AWS::StackName}}-{name}" }
+        } ]
+    }
+}
+
 def resource_lambda(name):
     return {
         "Type": "AWS::Lambda::Function",
@@ -194,6 +206,26 @@ def resource_lambda_ExecutionRole(name):
         }
     }
 
+def resource_lambda_permission(name,event):
+    return {
+        "Type": "AWS::Lambda::Permission",
+        "Properties": {
+            "FunctionName": { "Ref": name },
+            "Action": "lambda:InvokeFunction",
+            "Principal": "events.amazonaws.com",
+            "SourceArn": { "Fn::GetAtt": [event, "Arn"] }
+        }
+    }
+
+def resource_natgateway(subnet,eip):
+    return {
+        "Type" : "AWS::EC2::NatGateway",
+        "Properties" : {
+            "AllocationId" : { "Fn::GetAtt" : [eip, "AllocationId"] },
+            "SubnetId" : { "Ref" : subnet },
+        }
+    }
+
 def resource_s3():
     return {
         "Type": "AWS::S3::Bucket",
@@ -212,10 +244,11 @@ def resource_securitygroup_web(vpc):
     return {
         "Type": "AWS::EC2::SecurityGroup",
         "Properties": {
-            "GroupDescription": "Enable HTTP access via port 80 and 443, and all outgoing traffic",
+            "GroupDescription": "Enable HTTP access via port 80 and 443, and SSH, and all outgoing traffic",
             "SecurityGroupIngress" : [
                 { "IpProtocol" : "tcp", "FromPort" : 80, "ToPort" : 80, "CidrIp" : "0.0.0.0/0" },
-                { "IpProtocol" : "tcp", "FromPort" : 443, "ToPort" : 443, "CidrIp" : "0.0.0.0/0" }
+                { "IpProtocol" : "tcp", "FromPort" : 443, "ToPort" : 443, "CidrIp" : "0.0.0.0/0" },
+                { "IpProtocol" : "tcp", "FromPort" : 22, "ToPort" : 22, "CidrIp" : "0.0.0.0/0" }
             ],
             "SecurityGroupEgress" : [
                 { "IpProtocol" : "-1", "CidrIp" : "0.0.0.0/0" }
@@ -323,6 +356,17 @@ def resource_vpc_default_route_igw(igw,routeTable):
         "DependsOn" : [ igw, routeTable ]
     }
 
+def resource_vpc_default_route_natgateway(natgateway,routeTable):
+    return {
+        "Type" : "AWS::EC2::Route",
+        "Properties" : {
+            "RouteTableId" : { "Ref" :  routeTable  },
+            "DestinationCidrBlock" : "0.0.0.0/0",
+            "NatGatewayId" : { "Ref" : natgateway }
+        },
+        "DependsOn" : [ natgateway, routeTable ]
+    }
+
 def resource_vpc_subnet_route(subnet,route):
     return {
         "Type" : "AWS::EC2::SubnetRouteTableAssociation",
@@ -343,32 +387,14 @@ def output_WebsiteURL(name):
 
 # =========================== Other code procedures ===========================
 
-def request_sg(name,cloudFormation,args):
-    if args.sg:
-        if not args.sg in cloudFormation['Resources']:
-            for r in cloudFormation['Resources']:
-                if cloudFormation['Resources'][r]['Type'] == 'AWS::EC2::SecurityGroup':
-                    log("INFO",f" - Found Security Group : {r}")
-
-            log("FATAL","A security group was specified that does not exist in the template")
-        else:
-            if not cloudFormation['Resources'][args.sg]['Type'] == 'AWS::EC2::SecurityGroup':
-                log("FATAL","A CloudFormation resource was provided that is not a Security Group")
-
-        if f'{name}SecurityGroup' in cloudFormation['Parameters']:
-            log("WARNING",f"Removing parameter - {name}SecurityGroup")
-            del cloudFormation['Parameters'][f'{name}SecurityGroup']
-        return args.sg
-
-    else:
-        log("INFO","Creating a parameter for request the security group name")
-        cloudFormation['Parameters'][f'{name}SecurityGroup'] = parameter_SecurityGroup()
-        return f'{name}SecurityGroup'
-
-    return None
-
 def log(e,t):
-    print(f"[{e}] - {t}")
+    if e != '':
+        print(f"[{e}] {t}")
+    else:
+        print("---------------------------------------")
+        print(f"{t}")
+        print("---------------------------------------")
+
     if e == "FATAL":
         exit(1)
 
@@ -379,16 +405,66 @@ def findResources(cf,res):
             l.append(r)
     return l
 
+def resourceSelector(cf,cmdline,resourcetype,id = None,param = None):
+    # == did we specify something on the command line?
+    
+    if cmdline:
+        # == does it not exist?  Fail
+        items = []
+        if param != None and param.startswith('List') and ',' in cmdline:
+            itms = cmdline.split(',')
+        else:
+            itms = [ cmdline ]
+
+        for i in itms:
+            if not i in cf['Resources']:
+                log("FATAL",f"Unknown resource specified - {i}")
+            else:
+                if not cf['Resources'][i]['Type'] == resourcetype:
+                    log("FATAL",f"Resource {cmdline} is not a type {resourcetype}")
+                
+        log("INFO",f"selected {resourcetype} -> {cmdline}")
+        if id in cf['Parameters']:
+            log("WARNING",f"Deleting Parameter {id}")
+            del cf['Parameters'][id]
+
+        return cmdline
+    else:
+        x = findResources(cf,resourcetype)
+        if len(x) == 0:
+            if id != None:
+                log("WARNING",f"Creating Parameter for {id} ({param})")
+                cf['Parameters'][id] = { "Type" : param } 
+                return id
+            else:
+                log("FATAL",f"No resource of type {resourcetype} exists.")
+        elif len(x) == 1:
+            log("INFO",f"assumed {resourcetype} -> {x[0]}")
+            return x[0]
+        else:
+            log("ERROR",f"No {resourcetype} was specified, and we cannot assume what to use.")
+            for y in x:
+                log("INFO",f" - {y}")
+            log("FATAL","Cannot assume a single resource to use")
+
 def main():
     parser = argparse.ArgumentParser(description='CloudFormation Helper')
     parser.add_argument('-cf', help='Path to the CloudFormation json file', required=True)
     parser.add_argument('-add',help='Add a new resource to the CloudFormation file',nargs='+')
+    parser.add_argument('-properties',help='Add a custom Properties value into the resource',nargs='+')
     parser.add_argument('-list',help='List the resources',action='store_true')
     parser.add_argument('-link',help='Links one resource to another',nargs='+')
     parser.add_argument('-desc',help='Set a description for the CloudFormation file')
     parser.add_argument('-sg',help='Specify a security group resource to use - if none is specified, a parameter will be used')
     parser.add_argument('-lt',help='Specify a launch template to use if there are more than 1 created (used by autoscaling).')
+    parser.add_argument('-cron',help='Specify a cron schedule (used by eventbridge')
+    parser.add_argument('-target',help='Specify a lambda function (used by eventbridge')
+    parser.add_argument('-vpc',help='Specify the VPC id to use (used by natgateway)')
+    parser.add_argument('-cidr',help='Specify the CIDR range to use (used by vpc and subnet)')
+    parser.add_argument('-routetable',help='Specify the route table to use (used by publicsubnet and privatesubnet)')
+    parser.add_argument('-az',help='Specify the availability zone to use (0,1,2) (used by publicsubnet and privatesubnet)')
     parser.add_argument('-subnet',help='Specify a subnet to use')
+    parser.add_argument('-updatestack',help='Update the CloudFormation stack (specify the stack name)')
     
     args = parser.parse_args()
 
@@ -433,176 +509,175 @@ def main():
         if name != args.add[1]:
             log("WARNING",f"Resource name {name} has been adjusted to meet CloudFormation requirements.  See \"Logical Id\" in https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html for more information")
 
-        log("INFO",f"Adding resources type {resource} - {name}")
+        log("",f"Adding resources type {resource} - {name}")
 
-        if resource == 's3':
+        if resource == 'vpc':
+            if not args.cidr:
+                log("FATAL","Provide the CIDR range for this VPC")
+            cloudFormation['Resources'][name] = resource_vpc(args.cidr)
+            cloudFormation['Resources'][f"{name}InternetGateway"] = resource_vpc_igw()
+            cloudFormation['Resources'][f"{name}InternetGatewayAttachment"] = resource_vpc_igw_attachment(f"{name}InternetGateway",name)
+            cloudFormation['Resources'][f"{name}RouteTableInternetGateway"] = resource_vpc_route_table(name)
+            cloudFormation['Resources'][f"{name}RouteInternetGateway"] = resource_vpc_default_route_igw(f"{name}InternetGateway",f"{name}RouteTableInternetGateway")
+        elif resource == 'publicsubnet':
+            if not args.cidr:
+                log("FATAL","Provide the CIDR range for this subnet")
+            if not args.az:
+                log("FATAL","Provide the AZ (-az) to use (use 0,1,2 - this is an array reference)")
+            vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
+            RouteTable = resourceSelector(cloudFormation,args.routetable,"AWS::EC2::RouteTable")
+            cloudFormation['Resources'][f"{name}"] = resource_vpc_subnet(vpc,args.cidr,args.az,{ "MapPublicIpOnLaunch" : True})
+            cloudFormation['Resources'][f"{name}Route"] = resource_vpc_subnet_route(f"{name}",RouteTable)
+        elif resource == 'privatesubnet':
+            if not args.cidr:
+                log("FATAL","Provide the CIDR range for this VPC")
+            if not args.az:
+                log("FATAL","Provide the AZ (-az) to use (use 0,1,2 - this is an array reference)")
+            
+            vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
+            RouteTable = resourceSelector(cloudFormation,args.routetable,"AWS::EC2::RouteTable")
+
+            cloudFormation['Resources'][f"{name}"] = resource_vpc_subnet(vpc,args.cidr,args.az,{})
+            cloudFormation['Resources'][f"{name}Route"] = resource_vpc_subnet_route(f"{name}",RouteTable)
+        elif resource == 'securitygroup':
+            vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC","VpcId","AWS::EC2::VPC::Id")
+            cloudFormation['Resources'][name] = resource_securitygroup_web(vpc)
+        elif resource == 's3':
             cloudFormation['Resources'][name] = resource_s3()
+        elif resource == 'ec2':
+            subnet = resourceSelector(cloudFormation,args.subnet,"AWS::EC2::Subnet",f"{name}Subnet","AWS::EC2::Subnet::Id")
+            mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
+            
+            cloudFormation['Parameters']['LatestAmiId'] = parameter_LatestAmiId()
+            cloudFormation['Resources'][f"{name}ec2Role"] = resource_ec2Role()
+            cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resource_ec2InstanceProfile(f"{name}ec2Role")
+            cloudFormation['Resources'][name] = resource_ec2Instance(name,f"{name}ec2InstanceProfile",'LatestAmiId',mySG,subnet)
         elif resource == 'static':
             cloudFormation['Resources'][name] = resource_static()
             cloudFormation['Resources'][f"{name}bucketPolicy"] = resource_static_bucketPolicy(name)
             cloudFormation['Outputs'][name] = output_WebsiteURL(name)
+        elif resource == 'natgateway':
+            subnet = resourceSelector(cloudFormation,args.subnet,"AWS::EC2::Subnet")
+            vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
+            
+            cloudFormation['Resources'][f"{name}ElasticIP"] = resource_eip()
+            cloudFormation['Resources'][name] = resource_natgateway(subnet,f"{name}ElasticIP")
+            cloudFormation['Resources'][f"{name}RouteTableNATGateway"] = resource_vpc_route_table(vpc)
+            cloudFormation['Resources'][f"{name}RouteNATGateway"] = resource_vpc_default_route_natgateway(f"{name}",f"{name}RouteTableNATGateway")
         elif resource == 'lambda':
             cloudFormation['Resources'][name] = resource_lambda(name)
             cloudFormation['Resources'][f"{name}ExecutionRole"] = resource_lambda_ExecutionRole(name)
             log("INFO",f'Create a file called {name}.py to cause cfh to update the code automatically')
         elif resource == 'launchtemplate':
-            mySG = request_sg(name,cloudFormation,args)
+            mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
             cloudFormation['Parameters']['LatestAmiId'] = parameter_LatestAmiId()
             cloudFormation['Resources'][f"{name}ec2Role"] = resource_ec2Role()
             cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resource_ec2InstanceProfile(f"{name}ec2Role")
             cloudFormation['Resources'][f"{name}"] = resource_ec2LaunchTemplate(name,f"{name}ec2InstanceProfile","LatestAmiId",mySG)
         elif resource == 'autoscaling':
-            if args.subnet:
-                subnet = args.subnet.split(',')
-                l = findResources(cloudFormation,"AWS::EC2::Subnet")
-                for s in subnet:
-                    if not s in l:
-                        for y in l:
-                            log("INFO",f" - {y}")
-                        log("FATAL",f"Subnet {s} not found")
-
-                if f'{name}Subnets' in cloudFormation['Parameters']:
-                    log("WARNING",f"Deleting parameter {name}Subnets")
-                    del cloudFormation['Parameters'][f'{name}Subnets']
-            else:
-                subnet = f"{name}Subnets"
-                log("INFO",f"Creating parameter {name}Subnets")
-                cloudFormation['Parameters'][f'{name}Subnets'] = parameter_Subnets()
-                
-            # -- look for launch templates - if we find only 1, use it
-            LT = findResources(cloudFormation,'AWS::EC2::LaunchTemplate')
+            subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
+            lt = resourceSelector(cloudFormation,args.lt,'AWS::EC2::LaunchTemplate')
+            VPCZoneIdentifier = []
+            for x in subnets:
+                VPCZoneIdentifier.append({"Ref" : x })               
+            cloudFormation['Resources'][f"{name}AutoScaling"] = resource_autoscaling(name,lt,VPCZoneIdentifier)    
+        elif resource == "parameter":
+            cloudFormation['Parameters'][name] = parameter_String(name)
+        elif resource == 'eventbridge':
+            if not args.cron:
+                log("FATAL","eventbridge needs a -cron parameter")
             
-            if len(LT) == 1:
-                lt = LT[0]
-            elif len(LT) > 1:
-                if not args.lt:
-                    log("FATAL","There are too many launch templates - select one with the -lt option")
-                if not args.lt in LT:
-                    log("FATAL","You provided an unknown launch template")
-                else:
-                    lt = args.lt
+            if not args.target:
+                log("FATAL","eventbridge needs a -target parameter")
+            
+            # -- confirm that target actually exists
+            if cloudFormation['Resources'].get(args.target,{})['Type'] == "AWS::Lambda::Function":
+                cloudFormation['Resources'][name] = resource_eventbridge_schedule(args.target,args.cron)
+                cloudFormation['Resources'][f"{name}lambdaPermission"] = resource_lambda_permission(args.target,name)
             else:
-                log("FATAL","There are no launch templates available.")
-
-            log("INFO",f"- Using Launch Template {lt}")
-            if type(subnet)==list:
-                VPCZoneIdentifier = []
-                for x in subnet:
-                    VPCZoneIdentifier.append({"Ref" : x })               
-            else:
-                VPCZoneIdentifier = { "Ref" : subnet}
-
-            cloudFormation['Resources'][f"{name}AutoScaling"] = resource_autoscaling(name,lt,VPCZoneIdentifier)
-        elif resource == 'securitygroup':
-            # -- we stick to a single VPC.  The chances of someone creating more than 1 VPC in a CF template is low.
-            vpcs = findResources(cloudFormation,"AWS::EC2::VPC")
-            if len(vpcs) == 0:
-                cloudFormation['Parameters']['VpcId'] = parameter_vpc()
-                vpc = 'VpcId'
-            else:
-                vpc = vpcs[0]
-                log("WARNING",f"Security Group will be created in VPC {vpc}")
-                if 'VpcId' in cloudFormation['Parameters']:
-                    del(cloudFormation['Parameters']['VpcId'])
-                    log("WARNING","Removing parameter VpcId")
-                    
-
-            cloudFormation['Resources'][name] = resource_securitygroup_web(vpc)
-        elif resource == 'ec2':
-            if args.subnet:
-                subnet = args.subnet
-                if f"{name}Subnet" in cloudFormation['Parameters']:
-                    log("WARNING",f"Deleting parameter - {name}Subnet")
-                    del cloudFormation['Parameters'][f"{name}Subnet"]
-            else:
-                subnet = f"{name}Subnet"
-
-                for x in findResources(cloudFormation,"AWS::EC2::Subnet"):
-                    log("INFO",f" - Found subnet - {x}")
-                
-                log("WARNING","Specify -subnet to define a subnet to use for this instance. Defaults to parameter")
-                cloudFormation['Parameters'][subnet] = parameter_Subnet()
-
-            mySG = request_sg(name,cloudFormation,args)
-            cloudFormation['Parameters']['LatestAmiId'] = parameter_LatestAmiId()
-            cloudFormation['Resources'][f"{name}ec2Role"] = resource_ec2Role()
-            cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resource_ec2InstanceProfile(f"{name}ec2Role")
-            cloudFormation['Resources'][name] = resource_ec2Instance(f"{name}ec2InstanceProfile",'LatestAmiId',mySG,subnet)
-        elif resource == 'vpc':
-            cloudFormation['Resources'][name] = resource_vpc("10.0.0.0/22")
-            cloudFormation['Resources'][f"{name}SubnetA0"] = resource_vpc_subnet(name,"10.0.0.0/24",0,{ "MapPublicIpOnLaunch" : True})
-            cloudFormation['Resources'][f"{name}SubnetB0"] = resource_vpc_subnet(name,"10.0.1.0/24",1,{ "MapPublicIpOnLaunch" : True})
-            cloudFormation['Resources'][f"{name}SubnetA1"] = resource_vpc_subnet(name,"10.0.2.0/24",0,{ "MapPublicIpOnLaunch" : False})
-            cloudFormation['Resources'][f"{name}SubnetB1"] = resource_vpc_subnet(name,"10.0.3.0/24",1,{ "MapPublicIpOnLaunch" : False})
-            cloudFormation['Resources'][f"{name}igw"] = resource_vpc_igw()
-            cloudFormation['Resources'][f"{name}igwattachment"] = resource_vpc_igw_attachment(f"{name}igw",name)
-            cloudFormation['Resources'][f"{name}RouteTable"] = resource_vpc_route_table(name)
-            cloudFormation['Resources'][f"{name}RouteIGW"] = resource_vpc_default_route_igw(f"{name}igw",f"{name}RouteTable")
-            cloudFormation['Resources'][f"{name}SubnetA0Route"] = resource_vpc_subnet_route(f"{name}SubnetA0",f"{name}RouteTable")
-            cloudFormation['Resources'][f"{name}SubnetB0Route"] = resource_vpc_subnet_route(f"{name}SubnetB0",f"{name}RouteTable")
-            cloudFormation['Resources'][f"{name}SubnetA1Route"] = resource_vpc_subnet_route(f"{name}SubnetA1",f"{name}RouteTable")
-            cloudFormation['Resources'][f"{name}SubnetB1Route"] = resource_vpc_subnet_route(f"{name}SubnetB1",f"{name}RouteTable")
-
-
-
+                log("FATAL","event bridge -target does not exist or is not a Lambda function")
+        
         else:
             log("FATAL",f"Unknown resource type - {resource}")
             
-        # -- Update the code for all Lambda function
-        for name in cloudFormation['Resources']:
-            if cloudFormation['Resources'][name]['Type'] == 'AWS::Lambda::Function':
-                if os.path.exists(f"{name}.py"):
-                    log("INFO",f"Found {name}.py - Updating Lambda function {name}")
-                    # TODO - if the file is too big, Lambda will not update it
-                    with open(f"{name}.py",'rt') as C:
-                        pc = C.readlines()
-                        cloudFormation['Resources'][name]['Properties']['Code']['ZipFile'] =  { "Fn::Join": ["", pc ]}
+    # == Add properties
+    if args.properties:
+        name = args.properties[0]
+        KEY = args.properties[1]
+        VALUE = args.properties[2]
 
-        # -- Update EC2 Launch Template UserData
-        for name in cloudFormation['Resources']:
-            if os.path.exists(f"{name}.sh"):
-                with open(f"{name}.sh",'rt') as C:
+        if not name in cloudFormation['Resources']:
+            log("FATAL","Unable to update Properties - resource {name} does not exist.")
+
+        log("WARNING",f"Updating properties for {name}.{KEY} = {VALUE}")
+        cloudFormation['Resources'][name]['Properties'][KEY] = VALUE
+        
+    # == Update the code for all Lambda function
+    for name in cloudFormation['Resources']:
+        if cloudFormation['Resources'][name]['Type'] == 'AWS::Lambda::Function':            
+            if os.path.exists(f"{name}.py"):
+                log("INFO",f"Found {name}.py - Updating Lambda function {name}")
+                # TODO - if the file is too big, Lambda will not update it
+                with open(f"{name}.py",'rt') as C:
                     pc = C.readlines()
+                    cloudFormation['Resources'][name]['Properties']['Code']['ZipFile'] =  { "Fn::Join": ["", pc ]}
 
-                if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::LaunchTemplate':
-                    log("INFO",f"Found {name}.sh - Updating Launch Template User Data {name}")
-                    cloudFormation['Resources'][name]['Properties']['LaunchTemplateData']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "", pc ] } }
-                if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::Instance':
-                    log("INFO",f"Found {name}.sh - Updating Launch Template User Data {name}")
-                    cloudFormation['Resources'][name]['Properties']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "", pc ] } }
+    # == Update EC2 Launch Template UserData
+    for name in cloudFormation['Resources']:
+        if os.path.exists(f"{name}.sh"):
+            with open(f"{name}.sh",'rt') as C:
+                pc = C.readlines()
+
+            if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::LaunchTemplate':
+                log("INFO",f"Found {name}.sh - Updating Launch Template User Data {name}")
+                cloudFormation['Resources'][name]['Properties']['LaunchTemplateData']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "", pc ] } }
+            if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::Instance':
+                log("INFO",f"Found {name}.sh - Updating EC2 User Data {name}")
+                cloudFormation['Resources'][name]['Properties']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "", pc ] } }
 
     # == link resources to each other
     if args.link:
-        # -- linking s3 to lambda
-        if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::S3::Bucket' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
-            log("INFO","Linking S3 to Lambda")
+        if not args.link[0] in cloudFormation['Parameters'] and not args.link[0] in cloudFormation['Resources']:
+            log("FATAL",f"Cannot link {args.link[0]} - it does not exist")
+        if not args.link[1] in cloudFormation['Resources']:
+            log("FATAL",f"Cannot link {args.link[1]} - it does not exist")
 
-            # -- update the Lambda variable
-            cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = { "Ref" : args.link[0] } 
-            
-            # -- update the Lamdba Execution Role policy
-            x = cloudFormation['Resources'][f"{args.link[1]}ExecutionRole"]['Properties']['Policies'][0]['PolicyDocument']['Statement']
+        if args.link[0] in cloudFormation['Parameters'] and args.link[1] in cloudFormation['Resources']:
+            if cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
+                log("INFO","Linking Parameter to Lambda")
+                cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = { "Ref" : args.link[0] } 
 
-            p = {
-                "Effect" : "Allow",
-                "Action" : [
-                    "s3:GetObject",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                    "s3:ListBuckets"
-                ],
-                "Resource" : {
-                    "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref": args.link[0] }, "/*" ] ]
+        if args.link[0] in cloudFormation['Resources'] and args.link[1] in cloudFormation['Resources']:
+            # -- linking s3 to lambda
+            if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::S3::Bucket' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
+                log("INFO",f"Linking S3 ({args.link[0]}) to Lambda ({args.link[1]})")
+
+                # -- update the Lambda variable
+                cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = { "Ref" : args.link[0] } 
+                
+                # -- update the Lamdba Execution Role policy
+                x = cloudFormation['Resources'][f"{args.link[1]}ExecutionRole"]['Properties']['Policies'][0]['PolicyDocument']['Statement']
+
+                p = {
+                    "Effect" : "Allow",
+                    "Action" : [
+                        "s3:GetObject",
+                        "s3:PutObject",
+                        "s3:DeleteObject",
+                        "s3:ListBuckets"
+                    ],
+                    "Resource" : {
+                        "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref": args.link[0] }, "/*" ] ]
+                    }
                 }
-            }
-            if not p in x:
-                log("WARNING","Updating policy")
-                x.append(p)
-            else:
-                log("INFO","Policy unchanged")
+                if not p in x:
+                    log("WARNING","Updating policy")
+                    x.append(p)
+                else:
+                    log("INFO","Policy unchanged")
 
-        else:
-            log("FATAL","Unsupported linking direction")
+            else:
+                log("FATAL","Unsupported linking direction")
 
         
     #print(json.dumps(cloudFormation, indent=4))
@@ -611,6 +686,29 @@ def main():
     result = json.dumps(cloudFormation,indent=4)
     with open(args.cf,"wt") as Q:
         Q.write(result)
+
+    if args.updatestack:
+        log("WARNING","====================================================================")
+        log("WARNING",f"UPDATING CLOUDFORMATION STACK - {args.updatestack}")
+        response = boto3.client('cloudformation').update_stack(  
+            StackName = args.updatestack,
+            TemplateBody = result,  
+            Capabilities = ['CAPABILITY_IAM']  
+        )
+        if 'StackId' in response:
+            log("INFO",response['StackId'])
+        else:
+            print(response)
+        log("WARNING","====================================================================")
+
+    # print("-----------------------")
+    # print("To update your stack, run:")
+    # print("")
+    # print(f"aws cloudformation update-stack --template-body file://{args.cf} --capabilities CAPABILITY_IAM --stack-name YOURSTACKNAME")
+    # print("")
+    # print("To create a new stack, run:")
+    # print("")
+    # print(f"aws cloudformation create-stack --template-body file://{args.cf} --capabilities CAPABILITY_IAM --stack-name YOURSTACKNAME")
 
 if __name__ == '__main__':
     main()

@@ -11,11 +11,76 @@ It also has the built-in capability to update Lambda function code, or EC2 UserD
 
 CFH is not intended to be a replacement for tools like Teraform or CDK, which are already much more advanced and mature than CFH.  This tool is for situations where the result is a CloudFormation template, and you require some assistance to add some resources to the template.  Instead of simply disregarding all the good work you've already done, where a need exists to create a new CloudFormation template from scratch, you can use CFH to do some of the heavy lifting for you.
 
+## Features of the tool
+
+* Adding resources
+* Listing all resources
+* Adding parameters
+* Linking dependencies
+* Updating Lambda functions code
+* Updating EC2 UserData
+
 ## Wish list for a future version
 
 * Use yaml files instead of json
 * Add docker containers
 * Add DynamoDB tables
+* Add RDS
+* Add a few more security group templates
+* Add a load balancer
+* Add lambda URLs
+* Add API Gateway
+
+### Linking
+
+* EC2 Roles to S3
+* EC2 Roles to Lambda
+* API Gateway to Lambda
+
+## -add resource options
+
+|**Option**|**Parameters**|**Resources**|**name**|
+|--|--|--|--|
+|`vpc`|`-cidr`|||
+|||AWS::EC2::VPC|{name}|
+|||AWS::EC2::InternetGateway|{name}InternetGateway|
+|||AWS::EC2::VPCGatewayAttachment|{name}InternetGatewayAttachment|
+|||AWS::EC2::RouteTable|{name}RouteTableInternetGateway|
+|||AWS::EC2::Route|{name}RouteInternetGateway|
+|`natgateway`|`-subnet` `-vpc` (`-routetable`)|||
+|||AWS::EC2::NatGateway|{name}|
+|||AWS::EC2::EIP|{name}ElasticIP|
+|||AWS::EC2::RouteTable|{name}RouteTableNATGateway|
+|||AWS::EC2::Route|{name}RouteNATGateway|
+|`publicsubnet`|`-vpc` `-az` `-cidr`|||
+|||AWS::EC2::Subnet|{name}|
+|||AWS::EC2::SubnetRouteTableAssociation|{name}Route|
+|`privatesubnet`|`-vpc` `-az` `-cidr`|||
+|||AWS::EC2::Subnet|{name}|
+|||AWS::EC2::SubnetRouteTableAssociation|{name}Route|
+|`securitygroup`|(`-vpc`)|||
+|||AWS::EC2::SecurityGroup|{name}|
+|`s3`||||
+|||AWS::S3::Bucket|{name}|
+|`ec2`|`-subnet` `-sg`|||
+|||AWS::EC2::Instance|{name}|
+|||AWS::IAM::Role|{name}ec2Role|
+|||AWS::IAM::InstanceProfile|{name}ec2InstanceProfile|
+|`static`|||||
+|||AWS::S3::Bucket|{name}|
+|||AWS::S3::BucketPolicy|{name}BucketPolicy|
+|`lambda`|||||
+|||AWS::Lambda::Function|{name}|
+|||AWS::IAM::Role|{name}ExecutionRole|
+|`launchtemplate`|`-sg`||||
+|||AWS::EC2::LaunchTemplate|{name}|
+|||AWS::IAM::Role|{name}ec2Role|
+|||AWS::IAM::InstanceProfile|{name}ec2InstanceProfile|
+|`autoscaling`|`-lt` `-subnets`||||
+|||AWS::AutoScaling::AutoScalingGroup|{name}|
+|`eventbridge`|`-cron` `-target`||||
+|||AWS::Events::Rule|{name}|
+|||AWS::Lambda::Permission|{name}lambdaPermission|
 
 ## Basic Usage
 
@@ -121,6 +186,12 @@ If more than one launch template exists, specify the one to use with the `-lt` o
 This template creates an inbound Port 80 / 443 (Web) security group.
 
 TODO - Create a few more templates, like database use, etc.
+
+#### natgateway
+
+Creates a NAT gateway, Elastic IP.  Also needs `-subnet` parameter
+
+`cfh.py -cf myCloudFormationFile.json -add natgateway myNATgateway -subnet myVPCSubnetA1`
 
 #### vpc
 
