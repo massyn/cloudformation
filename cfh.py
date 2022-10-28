@@ -2,6 +2,7 @@ import json
 import os
 import argparse
 import boto3
+import re
 
 # =========================== Parameter Templates ===========================
 
@@ -160,6 +161,17 @@ def resource_eventbridge_schedule(name,cron):
     }
 }
 
+def resource_functionurl(target):
+    return {
+        "Type" : "AWS::Lambda::Url",
+        "Properties" : {
+            "AuthType" : "NONE",
+            #"InvokeMode" : String,
+            #"Qualifier" : String,
+            "TargetFunctionArn" : { "Ref" : target }
+        }
+    }
+
 def resource_lambda(name):
     return {
         "Type": "AWS::Lambda::Function",
@@ -217,6 +229,17 @@ def resource_lambda_permission(name,event):
         }
     }
 
+def resource_lambda_function_public_permission(name):
+    return {
+        "Type": "AWS::Lambda::Permission",
+        "Properties": {
+            "FunctionName": { "Ref": name },
+            "Action": "lambda:InvokeFunctionUrl",
+            "Principal": "*",
+            "FunctionUrlAuthType" : "NONE"
+        }
+    }
+
 def resource_natgateway(subnet,eip):
     return {
         "Type" : "AWS::EC2::NatGateway",
@@ -224,6 +247,36 @@ def resource_natgateway(subnet,eip):
             "AllocationId" : { "Fn::GetAtt" : [eip, "AllocationId"] },
             "SubnetId" : { "Ref" : subnet },
         }
+    }
+
+def resource_rds_subnetgroup(DBSubnetGroupDescription,subnets):
+    SubnetIds = []
+    for s in subnets:
+        SubnetIds.append({ "Ref" : s})
+    return {
+        "Type": "AWS::RDS::DBSubnetGroup",
+        "Properties": {
+            "DBSubnetGroupDescription" : DBSubnetGroupDescription,
+            "SubnetIds": SubnetIds,
+        }
+    }
+
+def resource_rds(name,username,password,sg):
+    return {
+        "Type": "AWS::RDS::DBInstance",
+        "Properties" : {
+                "DBName" : name,
+                "AllocatedStorage": 20,
+                "DBInstanceClass" : "db.t3.micro",
+                "AutoMinorVersionUpgrade": True,
+                "Engine" : "mysql",
+                "MasterUsername" : { "Ref" : username },
+                "MasterUserPassword" : { "Ref" : password },
+                "MultiAZ" : False,
+                "VPCSecurityGroups" : [ { "Ref" : sg } ],
+                "DBSubnetGroupName" : { "Ref" : f"{name}SubnetGroup" } 
+         }
+
     }
 
 def resource_s3():
@@ -240,20 +293,25 @@ def resource_s3():
         }
     }
 
-def resource_securitygroup_web(vpc):
+def resource_securitygroup(vpc):
     return {
         "Type": "AWS::EC2::SecurityGroup",
         "Properties": {
-            "GroupDescription": "Enable HTTP access via port 80 and 443, and SSH, and all outgoing traffic",
-            "SecurityGroupIngress" : [
-                { "IpProtocol" : "tcp", "FromPort" : 80, "ToPort" : 80, "CidrIp" : "0.0.0.0/0" },
-                { "IpProtocol" : "tcp", "FromPort" : 443, "ToPort" : 443, "CidrIp" : "0.0.0.0/0" },
-                { "IpProtocol" : "tcp", "FromPort" : 22, "ToPort" : 22, "CidrIp" : "0.0.0.0/0" }
-            ],
-            "SecurityGroupEgress" : [
-                { "IpProtocol" : "-1", "CidrIp" : "0.0.0.0/0" }
-            ],
-            "VpcId": { "Ref": vpc}
+            "GroupDescription": "Security Group",
+            "SecurityGroupIngress" : [],
+            "SecurityGroupEgress" : [],
+            "VpcId": { "Ref": vpc }
+        }
+    }
+
+def resource_ssm_parameter(name,value):
+    return {
+        "Type": "AWS::SSM::Parameter",
+        "Properties": {
+            "Name": name,
+            "Value": value,
+            "Type": "String",
+            "Description": name,
         }
     }
 
@@ -385,6 +443,30 @@ def output_WebsiteURL(name):
         "Description": "URL for website hosted on S3"
     }
 
+def policy_s3bucket(bucket):
+    return {
+        "Effect" : "Allow",
+        "Action" : [
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:DeleteObject",
+            "s3:ListBuckets"
+        ],
+        "Resource" : [
+            { "Fn::Sub": "arn:${AWS::Partition}:s3:::" + bucket + "/*" }
+        ]
+    }
+
+def policy_ssm_parameter(parameter):
+    return {
+        "Effect" : "Allow",
+        "Action" : [
+            "ssm:GetParameter",
+        ],
+        "Resource" : [
+            { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/" + parameter }
+        ]
+    }
 # =========================== Other code procedures ===========================
 
 def log(e,t):
@@ -447,12 +529,41 @@ def resourceSelector(cf,cmdline,resourcetype,id = None,param = None):
                 log("INFO",f" - {y}")
             log("FATAL","Cannot assume a single resource to use")
 
+def securityGroupRule(cf,cidr,tcp,udp):
+    
+    if tcp and udp:
+        log("FATAL","Do not specify both TCP and UDP.  Do them one at a time.")
+
+    # == start building a rule
+    rule = { "IpProtocol" : "-1" }
+    if tcp != None and udp == None:
+        rule = { "IpProtocol" : "tcp", "FromPort" : tcp, "ToPort" : tcp }
+    if tcp == None and udp != None:
+        rule = { "IpProtocol" : "udp", "FromPort" : udp, "ToPort" : udp }
+
+    # == is this a IPv4 CIDR?
+    if re.match("^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$",cidr):
+        rule['CidrIp'] = cidr
+    else:
+        # -- check if the reference provided is a security group
+        if cidr not in cf['Resources']:
+            log("FATAL",f"Not a resource in the CloudFormation template - {cidr}")
+        else:
+            
+            if not cf['Resources'][cidr]['Type'] == 'AWS::EC2::SecurityGroup':
+                log("FATAL","You can only link a security group to another security group.")
+
+            rule['SourceSecurityGroupId'] = { "Ref" : cidr }
+
+    return rule
+
 def main():
     parser = argparse.ArgumentParser(description='CloudFormation Helper')
     parser.add_argument('-cf', help='Path to the CloudFormation json file', required=True)
     parser.add_argument('-add',help='Add a new resource to the CloudFormation file',nargs='+')
     parser.add_argument('-properties',help='Add a custom Properties value into the resource',nargs='+')
     parser.add_argument('-list',help='List the resources',action='store_true')
+    parser.add_argument('-overwrite',help='Overwrite a resource',action='store_true')
     parser.add_argument('-link',help='Links one resource to another',nargs='+')
     parser.add_argument('-desc',help='Set a description for the CloudFormation file')
     parser.add_argument('-sg',help='Specify a security group resource to use - if none is specified, a parameter will be used')
@@ -464,6 +575,12 @@ def main():
     parser.add_argument('-routetable',help='Specify the route table to use (used by publicsubnet and privatesubnet)')
     parser.add_argument('-az',help='Specify the availability zone to use (0,1,2) (used by publicsubnet and privatesubnet)')
     parser.add_argument('-subnet',help='Specify a subnet to use')
+    parser.add_argument('-ingress',help='Specify the ingress CIDR range or resource to link to a security group')
+    parser.add_argument('-egress',help='Specify the egress CIDR range or resource to link to a security group')
+    parser.add_argument('-tcp',help='Specify the TCP port to link to a security group')
+    parser.add_argument('-udp',help='Specify the TCP port to link to a security group')
+    parser.add_argument('-value',help='Specify a value for an SSM Parameter')
+
     parser.add_argument('-updatestack',help='Update the CloudFormation stack (specify the stack name)')
     
     args = parser.parse_args()
@@ -509,6 +626,10 @@ def main():
         if name != args.add[1]:
             log("WARNING",f"Resource name {name} has been adjusted to meet CloudFormation requirements.  See \"Logical Id\" in https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html for more information")
 
+        # TODO - we need to figure out how we deal with security groups.. They're a little tricky with the -overwrite option
+        #if name in cloudFormation['Resources'] and not args.overwrite:
+        #    log("FATAL",f"Cannot add resource {name} - it already exists.  Use -overwrite to replace it.")
+
         log("",f"Adding resources type {resource} - {name}")
 
         if resource == 'vpc':
@@ -541,7 +662,17 @@ def main():
             cloudFormation['Resources'][f"{name}Route"] = resource_vpc_subnet_route(f"{name}",RouteTable)
         elif resource == 'securitygroup':
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC","VpcId","AWS::EC2::VPC::Id")
-            cloudFormation['Resources'][name] = resource_securitygroup_web(vpc)
+            if not name in cloudFormation['Resources']:
+                cloudFormation['Resources'][name] = resource_securitygroup(vpc)
+
+            if args.ingress:
+                cloudFormation['Resources'][name]['Properties']['SecurityGroupIngress'].append(
+                    securityGroupRule(cloudFormation,args.ingress,args.tcp,args.udp)
+                )
+            if args.egress:
+                cloudFormation['Resources'][name]['Properties']['SecurityGroupEgress'].append(
+                    securityGroupRule(cloudFormation,args.egress,args.tcp,args.udp)
+                )
         elif resource == 's3':
             cloudFormation['Resources'][name] = resource_s3()
         elif resource == 'ec2':
@@ -555,7 +686,11 @@ def main():
         elif resource == 'static':
             cloudFormation['Resources'][name] = resource_static()
             cloudFormation['Resources'][f"{name}bucketPolicy"] = resource_static_bucketPolicy(name)
-            cloudFormation['Outputs'][name] = output_WebsiteURL(name)
+            cloudFormation['Outputs'][name] = {
+                "Value" : { "Fn::GetAtt" : [ name, "WebsiteURL" ] },
+                "Description": "URL for website hosted on S3"
+            }
+    
         elif resource == 'natgateway':
             subnet = resourceSelector(cloudFormation,args.subnet,"AWS::EC2::Subnet")
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
@@ -596,7 +731,36 @@ def main():
                 cloudFormation['Resources'][f"{name}lambdaPermission"] = resource_lambda_permission(args.target,name)
             else:
                 log("FATAL","event bridge -target does not exist or is not a Lambda function")
-        
+        elif resource == 'functionurl':
+            if not args.target:
+                log("FATAL","functionurl needs a -targe parameter")
+
+            cloudFormation['Resources'][name] = resource_functionurl(args.target)
+            cloudFormation['Resources'][f"{name}permission"] = resource_lambda_function_public_permission(name)
+            cloudFormation['Outputs'][name] = {
+                "Value" : { "Fn::GetAtt" : [ name, "FunctionUrl" ] },
+                "Description": "URL for Lambda function"
+            }
+        elif resource == 'ssmparameter':
+            if not args.value:
+                log("FATAL","Missing -value parameter")
+            cloudFormation['Resources'][name] = resource_ssm_parameter(name,args.value)
+        elif resource == 'rds':
+            cloudFormation['Parameters'][f"{name}MasterUserName"] = parameter_String(f"{name}MasterUserName")
+            cloudFormation['Parameters'][f"{name}MasterPassword"] = parameter_String(f"{name}MasterPassword")
+
+            subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
+            mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
+
+            cloudFormation['Resources'][name] = resource_rds(name,f"{name}MasterUserName",f"{name}MasterPassword",mySG)
+            cloudFormation['Resources'][f"{name}SubnetGroup"] = resource_rds_subnetgroup(name,subnets)
+
+            cloudFormation['Outputs'][name] = {
+                "Value" : { "Fn::GetAtt" : [ name, "Endpoint.Address" ] },
+                "Description": "Database Endpoint"
+            }
+
+
         else:
             log("FATAL",f"Unknown resource type - {resource}")
             
@@ -644,10 +808,23 @@ def main():
 
         if args.link[0] in cloudFormation['Parameters'] and args.link[1] in cloudFormation['Resources']:
             if cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
-                log("INFO","Linking Parameter to Lambda")
+                log("INFO",f"Linking Parameter ({args.link[0]}) to Lambda ({args.link[1]})")
                 cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = { "Ref" : args.link[0] } 
 
         if args.link[0] in cloudFormation['Resources'] and args.link[1] in cloudFormation['Resources']:
+            # -- linking s3 to ec2
+            if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::S3::Bucket' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::EC2::Instance':
+                log("INFO",f"Linking S3 ({args.link[0]}) to EC2 Role ({args.link[1]})")
+                x = cloudFormation['Resources'][f"{args.link[1]}ec2Role"]['Properties']['AssumeRolePolicyDocument']['Statement']
+                
+                p = policy_s3bucket(args.link[0])
+                
+                if not p in x:
+                    log("WARNING","Updating policy")
+                    x.append(p)
+                else:
+                    log("INFO","Policy unchanged")
+
             # -- linking s3 to lambda
             if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::S3::Bucket' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
                 log("INFO",f"Linking S3 ({args.link[0]}) to Lambda ({args.link[1]})")
@@ -655,29 +832,37 @@ def main():
                 # -- update the Lambda variable
                 cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = { "Ref" : args.link[0] } 
                 
-                # -- update the Lamdba Execution Role policy
+                # -- update the Lambda Execution Role policy
                 x = cloudFormation['Resources'][f"{args.link[1]}ExecutionRole"]['Properties']['Policies'][0]['PolicyDocument']['Statement']
 
-                p = {
-                    "Effect" : "Allow",
-                    "Action" : [
-                        "s3:GetObject",
-                        "s3:PutObject",
-                        "s3:DeleteObject",
-                        "s3:ListBuckets"
-                    ],
-                    "Resource" : {
-                        "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref": args.link[0] }, "/*" ] ]
-                    }
-                }
+                p = policy_s3bucket(args.link[0])
+                
                 if not p in x:
                     log("WARNING","Updating policy")
                     x.append(p)
                 else:
                     log("INFO","Policy unchanged")
 
-            else:
-                log("FATAL","Unsupported linking direction")
+            # -- linking ssm parameter to lambda
+            if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::SSM::Parameter' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
+                log("INFO",f"Linking SSM Parameter ({args.link[0]}) to Lambda ({args.link[1]})")
+
+                # -- update the Lambda variable
+                cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = "{{resolve:ssm:" + args.link[0] + "}}" #{ "Ref" : args.link[0] } 
+                
+                # -- update the Lambda Execution Role policy
+                x = cloudFormation['Resources'][f"{args.link[1]}ExecutionRole"]['Properties']['Policies'][0]['PolicyDocument']['Statement']
+
+                p = policy_ssm_parameter(args.link[0])
+                
+                if not p in x:
+                    log("WARNING","Updating policy")
+                    x.append(p)
+                else:
+                    log("INFO","Policy unchanged")
+
+            #else:
+                #log("FATAL","Unsupported linking direction")
 
         
     #print(json.dumps(cloudFormation, indent=4))

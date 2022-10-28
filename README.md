@@ -22,22 +22,34 @@ CFH is not intended to be a replacement for tools like Teraform or CDK, which ar
 
 ## Wish list for a future version
 
+### New Resources
+
+* dynamodb
+* RDS
+* Add a load balancer to an autoscaler
+* sns
+* Add docker lambda
+
+### Functional
+
 * Use yaml files instead of json
-* Add docker containers
-* Add DynamoDB tables
-* Add RDS
-* Add a few more security group templates
-* Add a load balancer
-* Add lambda URLs
-* Add API Gateway
+* Add docker containers (EKS?? / Lambda??)
 
 ### Linking
 
-* EC2 Roles to S3
-* EC2 Roles to Lambda
-* API Gateway to Lambda
+* EC2 Roles to invoke Lambda
+* Roles to SSM Parameters
 
-## -add resource options
+## Walk-through examples
+
+### Create a VPC and a Bastion server
+
+### Create a Lambda function to update an S3 website
+
+
+## Reference guide
+
+### -add resource options
 
 |**Option**|**Parameters**|**Resources**|**name**|
 |--|--|--|--|
@@ -81,6 +93,25 @@ CFH is not intended to be a replacement for tools like Teraform or CDK, which ar
 |`eventbridge`|`-cron` `-target`||||
 |||AWS::Events::Rule|{name}|
 |||AWS::Lambda::Permission|{name}lambdaPermission|
+|`functionurl`|`-target`||||
+|||AWS::Lambda::Url|{name}|
+|||AWS::Lambda::Permission|{name}permission|
+|`ssmparameter`|`-value`||||
+|||AWS::SSM::Parameter|{name}|
+|`rds`|`-subnet` `-sg`||||
+|||AWS::RDS::DBInstance|{name}|
+|||AWS::RDS::DBSubnetGroup|{name}SubnetGroup|
+
+
+## Linking
+
+|**From**|**To**|**Result**|
+|--|--|--|
+|`Parameter`|`Lambda`|Add environment variable to the Lambda function|
+|`s3`|`lambda`|Add environment variable to the Lambda function<br>Add an IAM policy to the Lambda Execution Role to allow access to the bucket|
+|`ssmparameter`|`lambda`|Add environment variable to the SSM Parameter<br>Add an IAM policy to the Lambda Execution Role to allow access to the SSM parameter|
+|`s3`|`ec2`|Add an IAM policy to the EC2 Role to allow access to the bucket|
+
 
 ## Basic Usage
 
@@ -203,11 +234,6 @@ Creates a NAT gateway, Elastic IP.  Also needs `-subnet` parameter
 * Creates routes to all subnets
 
 `cfh.py -cf myCloudFormationFile.json -add vpc myVPC`
-
-||**AZ 1**|**AZ 2**|
-|--|--|--|
-|Public|10.0.0.0/24|10.0.1.0/24|
-|Private|10.0.2.0/24|10.0.3.0/24|
 
 ## Linking resources
 
