@@ -21,7 +21,7 @@ def parameter_String(desc):
 
 # =========================== Resource Templates ===========================
 
-def resource_autoscaling(name,lt,VPCZoneIdentifier):
+def resource_autoscaling(name,lt,VPCZoneIdentifier,TargetGroupARNs):
     return {
         "Type" : "AWS::AutoScaling::AutoScalingGroup",
         "Properties" : {
@@ -33,7 +33,8 @@ def resource_autoscaling(name,lt,VPCZoneIdentifier):
             },
             "VPCZoneIdentifier" : VPCZoneIdentifier,
             "MaxSize" : 1,
-            "MinSize" : 1
+            "MinSize" : 1,
+            "TargetGroupARNs" : [{ "Ref" : TargetGroupARNs }]
         },
         "DependsOn" : [ lt ]
     }
@@ -435,6 +436,81 @@ def resource_vpc_subnet_route(subnet,route):
         "DependsOn" : [ route, subnet]
     }
 
+def resource_target_group(name,vpc):
+    return {
+        "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "Properties" : {
+            "Name" : name,
+            "HealthCheckEnabled" : True,
+            "HealthyThresholdCount" : 2,
+            "HealthCheckTimeoutSeconds" : 20,
+            #"HealthCheckProtocol" : "HTTP",
+            #"HealthCheckPort" : 80,
+            "VpcId" : { "Ref" : vpc },
+            "Port" : 80,
+            "Protocol" : "HTTP",
+            "Matcher" : {
+                "HttpCode" : "200,302"
+            }
+        }
+    }
+
+def resource_elbv2(SecurityGroups,Subnets):
+    ss = []
+    for s in Subnets:
+        ss.append({"Ref" : s })
+
+    return {
+        "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
+        "Properties" : {
+            "Scheme" : "internet-facing",
+            "SecurityGroups" : [ { "Ref" : SecurityGroups } ],
+            
+            "Subnets" : ss,
+            "Type" : "application"
+        }
+    }
+
+def resource_elbv2_listener(elbv2,targetGroup):
+    return {
+        "Type": "AWS::ElasticLoadBalancingV2::Listener",
+        "Properties": {
+            "DefaultActions": [],
+             "DefaultActions" : [{
+                "Type" : "forward",
+                "TargetGroupArn" : { "Ref" : targetGroup }
+            }],
+            "LoadBalancerArn": { "Ref": elbv2 },
+            "Port" : 80,
+            "Protocol" : "HTTP"
+            #"Port": 443,
+            #"Protocol": "HTTPS",
+            #"SslPolicy" : "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
+        }
+    }
+
+def resource_elbv2_listener_redirect(elbv2):
+    return {
+        "Type": "AWS::ElasticLoadBalancingV2::Listener",
+        "Properties": {
+            "DefaultActions": [
+                {
+                    "Type": "redirect",
+                    "RedirectConfig": {
+                        "Protocol": "HTTPS",
+                        "Port": 443,
+                        "Host": "#{host}",
+                        "Path": "/#{path}",
+                        "Query": "#{query}",
+                        "StatusCode": "HTTP_301"
+                    }
+                }
+            ],
+            "LoadBalancerArn": { "Ref": elbv2 },
+            "Port": 80,
+            "Protocol": "HTTP"
+        }
+    }
 # =========================== Output Templates ===========================
 
 def output_WebsiteURL(name):
@@ -619,6 +695,9 @@ def main():
 
     # == add resources to the file
     if args.add:
+        if len(args.add) != 2:
+            log("FATAL","When you call -add, you must use the format -add <type> <name>")
+        
         resource = args.add[0]
 
         # -- the name must only be alpha numeric
@@ -710,12 +789,28 @@ def main():
             cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resource_ec2InstanceProfile(f"{name}ec2Role")
             cloudFormation['Resources'][f"{name}"] = resource_ec2LaunchTemplate(name,f"{name}ec2InstanceProfile","LatestAmiId",mySG)
         elif resource == 'autoscaling':
+            vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC","VpcId","AWS::EC2::VPC::Id")
             subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
             lt = resourceSelector(cloudFormation,args.lt,'AWS::EC2::LaunchTemplate')
             VPCZoneIdentifier = []
             for x in subnets:
-                VPCZoneIdentifier.append({"Ref" : x })               
-            cloudFormation['Resources'][f"{name}AutoScaling"] = resource_autoscaling(name,lt,VPCZoneIdentifier)    
+                VPCZoneIdentifier.append({"Ref" : x })
+            cloudFormation['Resources'][f"{name}TargetGroup"] = resource_target_group(name,vpc)
+            cloudFormation['Resources'][f"{name}AutoScaling"] = resource_autoscaling(name,lt,VPCZoneIdentifier,f"{name}TargetGroup")
+            
+        elif resource == 'elbv2':
+            mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
+            subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
+            target = resourceSelector(cloudFormation,args.target,"AWS::ElasticLoadBalancingV2::TargetGroup")
+
+            cloudFormation['Resources'][name] = resource_elbv2(mySG,subnets)
+            cloudFormation['Resources'][f"{name}Listener"] = resource_elbv2_listener(name,target)
+            #cloudFormation['Resources'][f"{name}ListenerRedirect"] = resource_elbv2_listener_redirect(name)
+            cloudFormation['Outputs'][name] = {
+                "Value" : { "Fn::GetAtt" : [ name, "DNSName" ] },
+                "Description": "URL for application load balancer"
+            }
+
         elif resource == "parameter":
             cloudFormation['Parameters'][name] = parameter_String(name)
         elif resource == 'eventbridge':

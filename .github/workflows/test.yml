@@ -30,8 +30,9 @@ jobs:
           python cfh.py -cf test.json -add vpc myVPC -cidr 10.0.0.0/22
           python cfh.py -cf test.json -add publicsubnet myPublicSubnetA -az 0 -vpc myVPC -cidr 10.0.0.0/24
           python cfh.py -cf test.json -add publicsubnet myPublicSubnetB -az 1 -vpc myVPC -cidr 10.0.1.0/24
-          python cfh.py -cf test.json -add privatesubnet myPrivateSubnetA -az 0 -vpc myVPC -cidr 10.0.2.0/24
-          python cfh.py -cf test.json -add privatesubnet myPrivateSubnetB -az 1 -vpc myVPC -cidr 10.0.3.0/24
+          python cfh.py -cf test.json -add natgateway myNatGateway -subnet myPublicSubnetA
+          python cfh.py -cf test.json -add privatesubnet myPrivateSubnetA -az 0 -vpc myVPC -cidr 10.0.2.0/24 -routetable myNatGatewayRouteTableNATGateway
+          python cfh.py -cf test.json -add privatesubnet myPrivateSubnetB -az 1 -vpc myVPC -cidr 10.0.3.0/24 -routetable myNatGatewayRouteTableNATGateway
           # -- inbound web traffic
           python cfh.py -cf test.json -add securitygroup SGWebInbound -vpc myVPC -ingress 0.0.0.0/0 -tcp 80
           python cfh.py -cf test.json -add securitygroup SGWebInbound -vpc myVPC -ingress 0.0.0.0/0 -tcp 443
@@ -43,4 +44,8 @@ jobs:
           python cfh.py -cf test.json -add ec2 EC2WebServer1 -subnet myPublicSubnetA -sg SGWebInbound
           # -- create the database
           python cfh.py -cf test.json -add rds myDatabase -subnet myPrivateSubnetA,myPrivateSubnetB -sg SGdatabase
+          # -- launch template
+          python cfh.py -cf test.json -add launchtemplate LaunchTemplate -sg SGWebInbound
+          python cfh.py -cf test.json -add autoscaling myAutoscalingGroup -lt LaunchTemplate -subnet myPrivateSubnetA,myPrivateSubnetB -vpc myVPC
+          python cfh.py -cf test.json -add elbv2 myELBv2 -sg SGWebInbound -subnet myPublicSubnetA,myPublicSubnetB
                     

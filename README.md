@@ -1,6 +1,8 @@
 # CloudFormation Helper
 Cloudformation Helper script
 
+[![Publish](https://github.com/massyn/cloudformation/actions/workflows/test.yml/badge.svg)](https://github.com/massyn/cloudformation/actions/workflows/test.yml)
+
 ## What is CloudFormation Helper?
 
 CloudFormation Helper is a tool to help you add resources to CloudFormation templates, create basic links between resources, or update code used in EC2 UserData, or Lambda functions.
@@ -88,8 +90,13 @@ CFH is not intended to be a replacement for tools like Teraform or CDK, which ar
 |||AWS::EC2::LaunchTemplate|{name}|
 |||AWS::IAM::Role|{name}ec2Role|
 |||AWS::IAM::InstanceProfile|{name}ec2InstanceProfile|
-|`autoscaling`|`-lt` `-subnets`||||
+|`autoscaling`|`-lt` `-subnets` `-vpc`||||
 |||AWS::AutoScaling::AutoScalingGroup|{name}|
+|||AWS::ElasticLoadBalancingV2::TargetGroup|{Name}TargetGroup|
+|`elbv2`|`-sg` `-subnets` `-target`||||
+|||AWS::ElasticLoadBalancingV2::LoadBalancer|{name}|
+|||AWS::ElasticLoadBalancingV2::Listener|{name}Listener|
+|||AWS::ElasticLoadBalancingV2::Listener|{name}ListenerRedirect|
 |`eventbridge`|`-cron` `-target`||||
 |||AWS::Events::Rule|{name}|
 |||AWS::Lambda::Permission|{name}lambdaPermission|
