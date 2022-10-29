@@ -26,4 +26,7 @@ jobs:
           python -m pip install boto3
           python cfh.py -cf test.json -desc "Test CloudFormation file"
 
+          # -- test if we can create VPCs
+          python cfh.py -cf test.json -vpc
+
           
