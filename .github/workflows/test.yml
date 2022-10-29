@@ -27,6 +27,9 @@ jobs:
           python cfh.py -cf test.json -desc "Test CloudFormation file"
 
           # -- test if we can create VPCs
-          python cfh.py -cf test.json -vpc
+          python cfh.py -cf test.json add vpc myVPC -cidr 10.0.0.0/22
+          python cfh.py -cf test.json -add publicsubnet myPublicSubnetA -az 0 -vpc myVPC -cidr 10.0.0.0/24
+          python cfh.py -cf test.json -add privatesubnet myPrivateSubnetA -az 0 -vpc myVPC -cidr 10.0.2.0/24
+          
 
           
