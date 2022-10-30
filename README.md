@@ -13,41 +13,132 @@ It also has the built-in capability to update Lambda function code, or EC2 UserD
 
 CFH is not intended to be a replacement for tools like Teraform or CDK, which are already much more advanced and mature than CFH.  This tool is for situations where the result is a CloudFormation template, and you require some assistance to add some resources to the template.  Instead of simply disregarding all the good work you've already done, where a need exists to create a new CloudFormation template from scratch, you can use CFH to do some of the heavy lifting for you.
 
+## Caveats
+
+* CFH is not a replacement for Teraform or CDK.  Its purpose is to create a basic template, then it is up to you to customise.
+* Not all possible use cases and scenarios will be catered for.  The goal is to provide a template very quickly to get you up and running.  Any customisation is up to you.
+
 ## Features of the tool
 
-* Adding resources
-* Listing all resources
-* Adding parameters
-* Linking dependencies
-* Updating Lambda functions code
-* Updating EC2 UserData
+### Adding resources
+
+`python cfh.py -cf template.json -add s3 myS3Bucket`
+
+### Listing all resources
+
+`python cfh.py -cf template.json -list`
+
+### Adding parameters
+
+`python cfh.py -cf template.json -add parameter myParameter`
+
+### Linking dependencies
+
+`python cfh.py -cf template.json -link myS3Bucket myLambdaFunction`
+
+### Updating Lambda functions code
+
+CFH will check if a file called `{name}.py` exists - if it does, it will replace the `Code` section of the template with the contents of this file.
+
+### Updating EC2 UserData
+
+CFH will check if a file called `{name}.sh` exists - if it does, it will replace the `UserData` section of an EC2 instance or a launch template with the contents of this file.
+
+### Updating the stack on AWS (experimental)
+
+`python cfh.py -cf template.json -updatestack MyStackName`
 
 ## Wish list for a future version
 
 ### New Resources
 
-* dynamodb
-* RDS
-* Add a load balancer to an autoscaler
 * sns
+* sqs
 * Add docker lambda
 
 ### Functional
 
 * Use yaml files instead of json
 * Add docker containers (EKS?? / Lambda??)
+* Create the stack directly
+* Delete individual resources
 
 ### Linking
 
 * EC2 Roles to invoke Lambda
-* Roles to SSM Parameters
+* EC2 Roles to SSM Parameters
 
-## Walk-through examples
+## Use cases
 
-### Create a VPC and a Bastion server
+    WARNING - These examples are provided to demonstrate the capabilities of the tool.  You do run the risk of creating stacks that will most likely cost you money, so be careful what you deploy on your AWS accounts.  Components like the NAT Gateway are NOT free, and if you happen to leave it running, you will incur charges.
 
-### Create a Lambda function to update an S3 website
+### Serverless function to harvest data from a URL
 
+This use case will create a Lambda function URL that will take all the input data it receives, and store it in a DynamoDB table.
+
+|**Description**|**Command**|
+|--|--|
+|Create the basic template.|`python cfh.py -cf usecase1.json -desc "Use case 1 - Function URL to DynamoDB example"`|
+|Create the Lambda function|`python cfh.py -cf usecase1.json -add lambda usecase1lambda`|
+|Create the function URL, linked to the lambda function|`python cfh.py -cf usecase1.json -add functionurl myFunctionUrl -target usecase1lambda`|
+|Create your DynamoDB table|`python cfh.py -cf usecase1.json -add dynamodb myDynamoDbTable`|
+|Link the DynamoDB table to the Lambda function, allowing it permission to access the table|`python cfh.py -cf usecase1.json -link myDynamoDbTable usecase1lambda`|
+
+Provided the file `usecase1lambda.py` is in the same folder, it will be picked up and embedded in the Cloudformation template.
+
+### Static website updated every 5 minutes
+
+Using an Event Bridge schedule to trigger a lambda function every 5 minutes that will write a message to a static S3-hosted website.
+
+|**Description**|**Command**|
+|--|--|
+|Create the basic template|`python cfh.py -cf usecase2.json -desc "Use case 2 - Scheduled lambda to update a website"`|`|
+|Create the lambda function|`python cfh.py -cf usecase2.json -add lambda usecase2lambda`|
+|Create a static S3 website|`python cfh.py -cf usecase2.json -add static myStaticS3`|
+|Create an event bridge schedule to trigger the lambda function every 5 minutes|`python cfh.py -cf usecase2.json -add eventbridge myEventBridge -cron "rate(5 minutes)" -target usecase2lambda`|
+|Add a CloudFormation parameter that will be filled in by the user when they deploy the template|`python cfh.py -cf usecase2.json -add parameter websiteMessage`|
+|Create a parameter in the SSM Parameter store with a default value|`python cfh.py -cf usecase2.json -add ssmparameter mySSMParameterStore -value "Hello there!"`|
+|Give the Lambda function permissions to access the S3 bucket|`python cfh.py -cf usecase2.json -link myStaticS3 usecase2lambda`|
+|Pass the cloudformation parameter value to the lambda function|`python cfh.py -cf usecase2.json -link websiteMessage usecase2lambda`|
+|Give the Lambda function permissions to access the SSM Parameter store|`python cfh.py -cf usecase2.json -link mySSMParameterStore usecase2lambda`|
+
+### Create Bastion server
+
+This use case will create a EC2 server.  Without specifying the Vpc or subnet, it will add parameters to the template.
+
+|**Description**|**Command**|
+|--|--|
+|Create the basic template|`python cfh.py -cf usecase3.json -desc "Use case 3 - Bastion server"`|
+|Create a security group to allow Port 22 from the internet|`python cfh.py -cf usecase3.json -add securitygroup SGBastion -ingress 0.0.0.0/0 -tcp 22`|
+|Add an egress for all ports to the security group|`python cfh.py -cf usecase3.json -add securitygroup SGBastion -egress 0.0.0.0/0`|
+|Add an EC2 instance, and attach the security group to it|`python cfh.py -cf usecase3.json -add ec2 BastionServer -sg SGBastion`|
+|Update the properties of the EC2 instance to use a specific key|`python cfh.py -cf usecase3.json -properties BastionServer KeyName ap-southeast-2-2022`|
+
+### Create a redundant and secure web platform
+
+The following example is a highly redundant, very secure, 3-tier web server configuration.  It features 2 public subnets, and 2 private subnets, with an autoscaling load-balancer protecting the web servers from direct internet access.
+
+|**Description**|**Command**|
+|--|--|
+|Create the basic template|`python cfh.py -cf usecase4.json -desc "Use case 4 - Complex Wordpress example"`|
+|Create a VPC|`python cfh.py -cf usecase4.json -add vpc myVPC -cidr 10.0.0.0/22`|
+|Create two public subnets, one in each availability zone|`python cfh.py -cf usecase4.json -add publicsubnet myPublicSubnetA -az 0 -vpc myVPC -cidr 10.0.0.0/24`|
+||`python cfh.py -cf usecase4.json -add publicsubnet myPublicSubnetB -az 1 -vpc myVPC -cidr 10.0.1.0/24`|
+|Create a security group for the load balancer to allow inbound web traffic|`python cfh.py -cf usecase4.json -add securitygroup SGWebInbound -vpc myVPC -ingress 0.0.0.0/0 -tcp 80`|
+||`python cfh.py -cf usecase4.json -add securitygroup SGWebInbound -vpc myVPC -ingress 0.0.0.0/0 -tcp 443`|
+|The same security group should also allow outgoing traffic|`python cfh.py -cf usecase4.json -add securitygroup SGWebInbound -vpc myVPC -egress 0.0.0.0/0`|
+|Create a security group to allow the web server to communicate with the load balancer|`python cfh.py -cf usecase4.json -add securitygroup SGWebServer -vpc myVPC -ingress SGWebInbound -tcp 80`|
+||`python cfh.py -cf usecase4.json -add securitygroup SGWebServer -vpc myVPC -ingress SGWebInbound -tcp 443`|
+||`python cfh.py -cf usecase4.json -add securitygroup SGWebServer -vpc myVPC -egress 0.0.0.0/0`|
+|Create a security group to allow the web server to talk to the database|`python cfh.py -cf usecase4.json -add securitygroup SGdatabase -vpc myVPC -egress 0.0.0.0/0`|
+||`python cfh.py -cf usecase4.json -add securitygroup SGdatabase -vpc myVPC -ingress SGWebServer -tcp 3306`|
+|Create a NAT gateway to allow private subnets to reach the internet for patching|`python cfh.py -cf usecase4.json -add natgateway myNatGateway -subnet myPublicSubnetA`|
+|Create 2 private subnets linked to the NAT gateway|`python cfh.py -cf usecase4.json -add privatesubnet myPrivateSubnetA -az 0 -vpc myVPC -cidr 10.0.2.0/24 -routetable myNatGatewayRouteTableNATGateway`|
+||`python cfh.py -cf usecase4.json -add privatesubnet myPrivateSubnetB -az 1 -vpc myVPC -cidr 10.0.3.0/24 -routetable myNatGatewayRouteTableNATGateway`|
+|Create a launch template for the web server|`python cfh.py -cf usecase4.json -add launchtemplate usecase4WordpressLaunchTemplate -sg SGWebServer`|
+|Attach the launch template to an auto scaling group|`python cfh.py -cf usecase4.json -add autoscaling myAutoscalingGroup -lt usecase4WordpressLaunchTemplate -subnet myPrivateSubnetA,myPrivateSubnetB -vpc myVPC`|
+|Create a load balancer|`python cfh.py -cf usecase4.json -add elbv2 myELBv2 -sg SGWebInbound -subnet myPublicSubnetA,myPublicSubnetB`|
+|Create an RDS mySQL database|`python cfh.py -cf usecase4.json -add rds myDatabase -subnet myPrivateSubnetA,myPrivateSubnetB -sg SGdatabase`|
 
 ## Reference guide
 
@@ -108,151 +199,17 @@ CFH is not intended to be a replacement for tools like Teraform or CDK, which ar
 |`rds`|`-subnet` `-sg`||||
 |||AWS::RDS::DBInstance|{name}|
 |||AWS::RDS::DBSubnetGroup|{name}SubnetGroup|
-
-
-## Linking
-
-|**From**|**To**|**Result**|
-|--|--|--|
-|`Parameter`|`Lambda`|Add environment variable to the Lambda function|
-|`s3`|`lambda`|Add environment variable to the Lambda function<br>Add an IAM policy to the Lambda Execution Role to allow access to the bucket|
-|`ssmparameter`|`lambda`|Add environment variable to the SSM Parameter<br>Add an IAM policy to the Lambda Execution Role to allow access to the SSM parameter|
-|`s3`|`ec2`|Add an IAM policy to the EC2 Role to allow access to the bucket|
-
-
-## Basic Usage
-
-### Create your first CloudFormation template
-
-`cfh.py -cf myCloudFormationFile.json -desc "This is my first template"`
-
-### Adding Resources
-
-Resources within CFH can be added with the `-add` option
-
-#### s3
-
-Creates a basic S3 bucket, with public access denied
-
-`cfh.py -cf myCloudFormationFile.json -add s3 myS3Bucket`
-
-#### static
-
-* Creates a basic S3 bucket with web access enabled
-* Attaches a bucket policy to allow public access
-* Outputs the website URL as an output
-
-`cfh.py -cf myCloudFormationFile.json -add static myS3Website`
-
-#### lambda
-
-Creating a basic Python 3.9 Lambda function
-
-* Creates a Lambda function for Python 3.9
-* Creates a basic Lambda Execution Role, and attaches it to the function
-
-`cfh.py -cf myCloudFormationFile.json -add lambda myLambdaFunction`
-
-##### Refreshing Lambda code
-
-CFH will check if a file called `{name}.py` exists - if it does, it will replace the `Code` section of the template with the contents of this file.
-
-#### launchtemplate
-
-* Creates an EC2 role
-* Creates an EC2 Instance Profile linked to the EC2 role
-* Creates a parameter to retrieve the latest Amazon Linux 2 AMI from the SSM Parameter Store
-
-#### Refreshing UserData
-
-CFH will check if a file called `{name}.sh` exists - if it does, it will replace the `UserData` section of the template with the contents of this file.
-
-#### Asking for a Security Group
-
-Without specifying the `-sg` parameter, CFH will create a launch template, and generate a parameter to request the security group to be used.
-
-`cfh.py -cf myCloudFormationFile.json -add launchtemplate myLaunchTemplate`
-
-#### Providing a Security Group
-
-By specifying the `-sg` option, you can provide the resource reference to a security group to use instead of asking for it from the Parameter section.
-
-`cfh.py -cf myCloudFormationFile.json -add launchtemplate myLaunchTemplate -sg mySecurityGroup`
-
-#### ec2
-
-* Creates an EC2 Role
-* Creates an EC2 Instance Profile
-* Creates an EC2 Instance
-
-##### Refreshing UserData
-
-CFH will check if a file called `{name}.sh` exists - if it does, it will replace the `UserData` section of the template with the contents of this file.
-
-##### Asking for a Security Group
-
-Without specifying the `-sg` parameter, CFH will create an EC2 instance, and generate a parameter to request the security group to be used.
-
-`cfh.py -cf myCloudFormationFile.json -add ec2 myEC2instance -subnet myVPCSubnetA0`
-
-##### Providing a Security Group
-
-By specifying the `-sg` option, you can provide the resource reference to a security group to use instead of asking for it from the Parameter section.
-
-`cfh.py -cf myCloudFormationFile.json -add ec2 myEC2instance -sg mySecurityGroup`
-
-#### autoscaling
-
-* Creates an Autoscaling group
-* Creates a parameter to ask for Subnets to use (if -subnet is not specified)
-
-Create an autoscaling group linked to a launch template.  If only 1 launch template exists, the autoscaling group will use it.
-
-`cfh.py -cf myCloudFormationFile.json -add autoscaling myAutoScalingGroup -subnet myVPCSubnetA0`
-
-If more than one launch template exists, specify the one to use with the `-lt` option.
-
-`cfh.py -cf myCloudFormationFile.json -add autoscaling myAutoScalingGroup -lt myLaunchTemplate`
-
-#### securitygroup
-
-* Creates a Security Group
-* Creates a parameter to ask for a VpcId to use, or use the default VPC it finds in the template
-
-`cfh.py -cf myCloudFormationFile.json -add securitygroup mySecurityGroup`
-
-This template creates an inbound Port 80 / 443 (Web) security group.
-
-TODO - Create a few more templates, like database use, etc.
-
-#### natgateway
-
-Creates a NAT gateway, Elastic IP.  Also needs `-subnet` parameter
-
-`cfh.py -cf myCloudFormationFile.json -add natgateway myNATgateway -subnet myVPCSubnetA1`
-
-#### vpc
-
-* Creates a VPC of cidr 10.0.0./22
-* Creates 2 public subnets (10.0.0.0/24, 10.0.1.0/24)
-* Creates 2 private subnets (10.0.2.0/24, 10.0.3.0/24)
-* Creates an internet gateway
-* Creates a route table
-* Creates routes to all subnets
-
-`cfh.py -cf myCloudFormationFile.json -add vpc myVPC`
+|`dynamodb`|||||
+|||AWS::DynamoDB::Table|{name}|
 
 ## Linking resources
 
-Some resources can interact with each other.
+Some resources can interact with each other.  You sometimes would like the Lambda function to have access to the S3 bucket, or the DynamoDB table you just created.  Instead of struggling to figure out how to setup the IAM policy for it, CFH will create a basic IAM role for you to do the job.
 
-### s3 lambda
-
-* Grants the Lambda function Execution Role permissions to consume the S3 bucket
-* Includes the S3 bucket name as an environment variable on the Lambda function
-
-### lambda dynamodb (TODO)
-
-* Grants the Lambda function Execution Role permissions to consume the dynamodb table
-* Includes the dynamodb table name as an environment variable on the Lambda function
-
+|**From**|**To**|**Result**|
+|--|--|--|
+|`parameter`|`lambda`|Use the CloudFormation parameter as an environment variable to the Lambda function|
+|`s3`|`lambda`|Add environment variable to the Lambda function<br>Add an IAM policy to the Lambda Execution Role to allow access to the bucket|
+|`dynamodb`|`lambda`|Add environment variable to the Lambda function<br>Add an IAM policy to the Lambda Execution Role to allow access to the DynamoDB Table|
+|`ssmparameter`|`lambda`|Add environment variable to the SSM Parameter<br>Add an IAM policy to the Lambda Execution Role to allow access to the SSM parameter|
+|`s3`|`ec2`|Add an IAM policy to the EC2 Role to allow access to the bucket|

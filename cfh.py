@@ -3,122 +3,312 @@ import os
 import argparse
 import boto3
 import re
-
-# =========================== Parameter Templates ===========================
-
-def parameter_LatestAmiId():
-    return {
-        "Type" : "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
-        "Default" : "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2",
-        "Description" : "Path to the SSM Parameter that contains the latest Amazon Linux 2 image ID"
-    }
-
-def parameter_String(desc):
-    return {
-        "Type" : "String",
-        "Description" : desc
-    }
+   
 
 # =========================== Resource Templates ===========================
 
-def resource_autoscaling(name,lt,VPCZoneIdentifier,TargetGroupARNs):
-    return {
-        "Type" : "AWS::AutoScaling::AutoScalingGroup",
-        "Properties" : {
-            "AutoScalingGroupName" : name,
-            "DesiredCapacity"   : 1,
-            "LaunchTemplate" : {
-                "LaunchTemplateId" : { "Ref" : lt },
-                "Version" : { "Fn::GetAtt": [ lt, "LatestVersionNumber" ] }
-            },
-            "VPCZoneIdentifier" : VPCZoneIdentifier,
-            "MaxSize" : 1,
-            "MinSize" : 1,
-            "TargetGroupARNs" : [{ "Ref" : TargetGroupARNs }]
-        },
-        "DependsOn" : [ lt ]
-    }
+def resourceTemplate(name,type,**KW):
+    def check(KW,p):
+        if not p in KW:
+            log("FATAL",f"PARAM {p} is missing")
+        else:
+            if KW[p] == None:
+                log("FATAL",f"PARAM {p} is blank")
+        log("INFO",f" - Parameter {p} = {KW[p]}")
 
-def resource_ec2Role():
-    return {
-        "Type": "AWS::IAM::Role",
-        "Properties": {
-            "AssumeRolePolicyDocument": {
-                "Version": "2012-10-17",
-                "Statement": [
+    log("INFO",f"ResourceTemplate : Adding resource {type} ({name})")
+    if type == "vpc":
+        check(KW,'cidr')
+        return  {
+            "Type" : "AWS::EC2::VPC",
+            "Properties" : {
+                "CidrBlock" : KW['cidr'],
+                "EnableDnsHostnames" : True,
+                "EnableDnsSupport" : True,
+                "InstanceTenancy" : "default"
+            }
+        }
+    elif type == "igw":   
+        return {
+            "Type" : "AWS::EC2::InternetGateway",
+            "Properties" : {}
+        }
+    elif type == "igwattachment":
+        check(KW,'InternetGatewayId')
+        check(KW,'vpc')
+        return {
+            "Type" : "AWS::EC2::VPCGatewayAttachment",
+            "Properties" : {
+                "InternetGatewayId" : { "Ref" : KW['InternetGatewayId'] },
+                "VpcId" : { "Ref" : KW['vpc'] }
+            },
+            "DependsOn" : [ KW['InternetGatewayId'], KW['vpc'] ],
+        }
+    elif type == 'routetable':
+        check(KW,'vpc')
+        return {
+            "Type" : "AWS::EC2::RouteTable",
+            "Properties" : {
+                "VpcId" : { "Ref" : KW['vpc'] },
+                "Tags" : [
                     {
-                        "Effect": "Allow",
-                        "Principal": { "Service": [  "ec2.amazonaws.com" ] },
-                        "Action": [ "sts:AssumeRole" ]
+                    "Key" : "Name",
+                    "Value" : name
+                    }
+                ],
+            },
+            "DependsOn" : [ KW['vpc'] ]
+        }
+    elif type == 'routeigw':
+        check(KW,'InternetGatewayId')
+        check(KW,'RouteTableId')
+        return {
+            "Type" : "AWS::EC2::Route",
+            "Properties" : {
+                "RouteTableId" : { "Ref" : KW['RouteTableId']  },
+                "DestinationCidrBlock" : "0.0.0.0/0",
+                "GatewayId" : { "Ref" : KW['InternetGatewayId'] },
+            },
+            "DependsOn" : [ KW['InternetGatewayId'], KW['RouteTableId'] ]
+        }
+    elif type == 'routenatgw':
+        check(KW,'RouteTableId')
+        check(KW,'NatGatewayId')
+        return {
+            "Type" : "AWS::EC2::Route",
+            "Properties" : {
+                "RouteTableId" : { "Ref" :  KW['RouteTableId']  },
+                "DestinationCidrBlock" : "0.0.0.0/0",
+                "NatGatewayId" : { "Ref" : KW['NatGatewayId'] },
+            },
+            "DependsOn" : [ KW['NatGatewayId'], KW['RouteTableId'] ]
+        }
+    elif type == 'subnet':
+        check(KW,'vpc')
+        check(KW,'cidr')
+        check(KW,'az')
+        check(KW,'MapPublicIpOnLaunch')
+        return {
+            "Type" : "AWS::EC2::Subnet",
+            "Properties" : {
+                "VpcId" : { "Ref" : KW['vpc'] },
+                "CidrBlock" : KW['cidr'],
+                "AvailabilityZone" : { "Fn::Select" : [  KW['az'], { "Fn::GetAZs" : "" } ] },
+                "MapPublicIpOnLaunch" : KW['MapPublicIpOnLaunch'],
+                "Tags" : [
+                    {
+                    "Key" : "Name",
+                    "Value" : name
                     }
                 ]
+            }
+        }
+    elif type == 'subnetroute':
+        check(KW,'RouteTableId')
+        check(KW,'SubnetId')
+        return {
+            "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties" : {
+                "RouteTableId" : { "Ref" : KW['RouteTableId'] },
+                "SubnetId" : { "Ref" : KW['SubnetId'] }
             },
-            "Path": "/",
-            "ManagedPolicyArns" : [
-                "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+            "DependsOn" : [ KW['RouteTableId'], KW['SubnetId']]
+        }
+    elif type == 'securitygroup':
+        check(KW,'vpc')
+        return {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Security Group",
+                "SecurityGroupIngress" : [],
+                "SecurityGroupEgress" : [],
+                "VpcId": { "Ref": KW['vpc'] },
+                "Tags" : [
+                    {
+                    "Key" : "Name",
+                    "Value" : name
+                    }
+                ],
+            }
+        }
+    elif type == 's3':
+        return {
+            "Type": "AWS::S3::Bucket",
+            "Properties" : {
+                "AccessControl": "BucketOwnerFullControl",
+                "PublicAccessBlockConfiguration": {
+                    "BlockPublicAcls": True,
+                    "BlockPublicPolicy": True,
+                    "IgnorePublicAcls": True,
+                    "RestrictPublicBuckets": True
+                }
+            }
+        }
+    elif type == 'static':
+        return {
+            "Type": "AWS::S3::Bucket",
+            "Properties" : {
+                "AccessControl": "PublicRead",
+                "WebsiteConfiguration" : {
+                    "IndexDocument": "index.html",
+                    "ErrorDocument": "error.html"
+                }
+            },
+            "DeletionPolicy": "Delete"
+        }
+    elif type == 'staticbucketpolicy':
+        check(KW,'Bucket')
+        return {
+            "Type": "AWS::S3::BucketPolicy",
+            "Properties": {
+                "Bucket": { "Ref" : KW['Bucket']},
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": {
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "s3:GetObject",
+                        "Resource": { "Fn::Join": [ "", [ "arn:" , { "Ref" : "AWS::Partition"} , ":s3:::", { "Ref": KW['Bucket'] }, "/*" ] ] },
+                    }
+                }
+            },
+            "DependsOn" : [ KW['Bucket'] ]
+        }
+    elif type == 'eip':
+        return  {
+            "Type" : "AWS::EC2::EIP",
+            "Properties" : {
+                "Domain" : "vpc"
+            }
+        }
+    elif type == 'natgateway':
+        check(KW,'eip')
+        check(KW,'subnet')
+        return {
+            "Type" : "AWS::EC2::NatGateway",
+            "Properties" : {
+                "AllocationId" : { "Fn::GetAtt" : [ KW['eip'], "AllocationId"] },
+                "SubnetId" : { "Ref" : KW['subnet'] },
+            }
+        }
+    elif type == 'autoscaling':
+        check(KW,'LaunchTemplateId')
+        check(KW,'VPCZoneIdentifier')
+        check(KW,'TargetGroupARNs')
+        return {
+            "Type" : "AWS::AutoScaling::AutoScalingGroup",
+            "Properties" : {
+                "AutoScalingGroupName" : name,
+                "DesiredCapacity"   : 1,
+                "LaunchTemplate" : {
+                    "LaunchTemplateId" : { "Ref" : KW['LaunchTemplateId'] },
+                    "Version" : { "Fn::GetAtt": [ KW['LaunchTemplateId'], "LatestVersionNumber" ] }
+                },
+                "VPCZoneIdentifier" : KW['VPCZoneIdentifier'],
+                "MaxSize" : 1,
+                "MinSize" : 1,
+                "TargetGroupARNs" : [{ "Ref" : KW['TargetGroupARNs'] }]
+            },
+            "DependsOn" : [ KW['LaunchTemplateId'] ]
+        }
+    elif type == 'targetgroup':
+        check(KW,'vpc')
+        return {
+            "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+            "Properties" : {
+                "Name" : name,
+                "HealthCheckEnabled" : True,
+                "HealthyThresholdCount" : 2,
+                "HealthCheckTimeoutSeconds" : 20,
+                "VpcId" : { "Ref" : KW['vpc'] },
+                "Port" : 80,
+                "Protocol" : "HTTP",
+                "Matcher" : {
+                    "HttpCode" : "200,302"
+                }
+            },
+            "DependsOn" : [ KW['vpc'] ]
+        }
+    elif type == 'launchtemplate':
+        check(KW,'IamInstanceProfile')
+        check(KW,'ImageId')
+        check(KW,'SecurityGroup')
+        return {
+            "Type":"AWS::EC2::LaunchTemplate",
+            "Properties":{
+                "LaunchTemplateName":name,
+                "LaunchTemplateData":{
+                    "IamInstanceProfile":{ "Arn":{"Fn::GetAtt": [ KW['IamInstanceProfile'], "Arn"]} },
+                    "DisableApiTermination":"true",
+                    "ImageId": { "Ref" : KW['ImageId'] },
+                    "InstanceType":"t2.micro",
+                    "BlockDeviceMappings":[{
+                        "Ebs":{
+                            "VolumeSize":"8",
+                            "VolumeType":"gp2",
+                            "DeleteOnTermination": True,
+                            "Encrypted": True
+                        },
+                        "DeviceName": "/dev/xvda",
+                    }],
+                    "UserData"              : { "Fn::Base64" : { "Fn::Join" : ["\n", [
+                        "#!/usr/bin/bash",
+                        "yum update -y"
+                    ]]}},
+                    "SecurityGroupIds" : [ { "Ref" : KW['SecurityGroup'] } ]  
+                }
+            },
+            "DependsOn" : [
+                KW['IamInstanceProfile']
             ]
         }
-    }
-
-def resource_ec2Instance(name,IamInstanceProfile,ImageId,SecurityGroup, Subnet):
-    return {
-        "Type" : "AWS::EC2::Instance",
-        "Properties" : {
-            "ImageId" : { "Ref" : ImageId },
-            "IamInstanceProfile"    : { "Ref" : IamInstanceProfile },
-            "InstanceType" : "t2.micro",
-            "NetworkInterfaces": [ {
-                #"AssociatePublicIpAddress": "true",
-                "DeviceIndex": "0",
-                "GroupSet": [{ "Ref" : SecurityGroup }],
-                "SubnetId": { "Ref" : Subnet }
-            } ],
-            "BlockDeviceMappings":[{
-                "Ebs":{
-                    "VolumeSize":"8",
-                    "VolumeType":"gp2",
-                    "DeleteOnTermination": True,
-                    "Encrypted": True
+    elif type == 'instanceprofile':
+        check(KW,'Role')
+        return {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Path": "/",
+                "Roles": [ { "Ref": KW['Role'] } ]
+            },
+            "DependsOn" : [ KW['Role'] ]
+        }
+    elif type == 'ec2role':
+        return {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": { "Service": [  "ec2.amazonaws.com" ] },
+                            "Action": [ "sts:AssumeRole" ]
+                        }
+                    ]
                 },
-                "DeviceName": "/dev/xvda",
-            }],
-            "Tags" : [
-                {
-                "Key" : "Name",
-                "Value" : name
-                }
-            ],
-            "UserData"              : { "Fn::Base64" : { "Fn::Join" : ["\n", [
-                    "#!/usr/bin/bash",
-                    "yum update -y"
-                ]]}},
-        },
-        "DependsOn" : [
-            SecurityGroup,
-            IamInstanceProfile
-        ]
-    }
-
-def resource_ec2InstanceProfile(role):
-    return {
-        "Type": "AWS::IAM::InstanceProfile",
-        "Properties": {
-            "Path": "/",
-            "Roles": [ { "Ref": role } ]
-        },
-        "DependsOn" : [ role ]
-    }
-
-def resource_ec2LaunchTemplate(name,IamInstanceProfile,ImageId,SecurityGroup):
-    return {
-        "Type":"AWS::EC2::LaunchTemplate",
-        "Properties":{
-            "LaunchTemplateName":name,
-            "LaunchTemplateData":{
-                "IamInstanceProfile":{ "Arn":{"Fn::GetAtt": [IamInstanceProfile, "Arn"]} },
-                "DisableApiTermination":"true",
-                "ImageId": { "Ref" : ImageId },
-                "InstanceType":"t2.micro",
+                "Path": "/",
+                "ManagedPolicyArns" : [
+                    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+                ]
+            }
+        }
+    elif type == 'ec2instance':
+        check(KW,'IamInstanceProfile')
+        check(KW,'ImageId')
+        check(KW,'SecurityGroup')
+        check(KW,'Subnet')
+        return {
+            "Type" : "AWS::EC2::Instance",
+            "Properties" : {
+                "ImageId" : { "Ref" : KW['ImageId'] },
+                "IamInstanceProfile"    : { "Ref" : KW['IamInstanceProfile'] },
+                "InstanceType" : "t2.micro",
+                "NetworkInterfaces": [ {
+                    #"AssociatePublicIpAddress": "true",
+                    "DeviceIndex": "0",
+                    "GroupSet": [{ "Ref" : KW['SecurityGroup'] }],
+                    "SubnetId": { "Ref" : KW['Subnet'] }
+                } ],
                 "BlockDeviceMappings":[{
                     "Ebs":{
                         "VolumeSize":"8",
@@ -128,421 +318,319 @@ def resource_ec2LaunchTemplate(name,IamInstanceProfile,ImageId,SecurityGroup):
                     },
                     "DeviceName": "/dev/xvda",
                 }],
+                "Tags" : [
+                    {
+                    "Key" : "Name",
+                    "Value" : name
+                    }
+                ],
                 "UserData"              : { "Fn::Base64" : { "Fn::Join" : ["\n", [
-                    "#!/usr/bin/bash",
-                    "yum update -y"
-                ]]}},
-                "SecurityGroupIds" : [ { "Ref" : SecurityGroup } ]
-            }
-        },
-        "DependsOn" : [
-            IamInstanceProfile
-        ]
-    }
-
-def resource_eip():
-    return  {
-        "Type" : "AWS::EC2::EIP",
-        "Properties" : {
-            "Domain" : "vpc"
-        }
-    }
-
-def resource_eventbridge_schedule(name,cron):
-    return {
-    "Type": "AWS::Events::Rule",
-    "Properties": {
-        "Description": f"Scheduled event to trigger the Lambda function {name}",
-        "ScheduleExpression" : cron,
-        "State": "ENABLED",
-        "Targets": [{ 
-            "Arn": { "Fn::GetAtt": [ name, "Arn" ] },
-            "Id" : { "Fn::Sub": f"${{AWS::StackName}}-{name}" }
-        } ]
-    }
-}
-
-def resource_functionurl(target):
-    return {
-        "Type" : "AWS::Lambda::Url",
-        "Properties" : {
-            "AuthType" : "NONE",
-            #"InvokeMode" : String,
-            #"Qualifier" : String,
-            "TargetFunctionArn" : { "Ref" : target }
-        }
-    }
-
-def resource_lambda(name):
-    return {
-        "Type": "AWS::Lambda::Function",
-        "Properties": {
-            "Handler": "index.lambda_handler",
-            "Role": { "Fn::GetAtt": [ f"{name}ExecutionRole", "Arn" ] },
-            "Description" : name,
-            "Code": {
-                "ZipFile":  { "Fn::Join": ["\n", [
-                    "import boto3",
-                    "def lambda_handler(event, context):",
-                    "    return { 'statusCode': 200, 'body': 'ok' }"
-                ]]}
+                        "#!/usr/bin/bash",
+                        "yum update -y"
+                    ]]}},
             },
-            "Runtime": "python3.9",
-            "FunctionName": { "Fn::Sub": f"${{AWS::StackName}}-{name}" },
-            "Timeout": 300,
-            "TracingConfig": { "Mode": "Active" },
-            "Environment": {
-                "Variables": {}
-            }
-        },
-        "DependsOn" : [ f"{name}ExecutionRole" ]
-    }
-
-def resource_lambda_ExecutionRole(name):
-    return {
-        "Type": "AWS::IAM::Role",
-        "Properties": {
-            "AssumeRolePolicyDocument": {
-                "Version": "2012-10-17",
-                "Statement": [{ "Effect": "Allow", "Principal": {"Service": ["lambda.amazonaws.com"]}, "Action": ["sts:AssumeRole"] }]
-            },
-            "Path": "/",
-            "Policies": [{
-                "PolicyName" : { "Fn::Sub": f"${{AWS::StackName}}-{name}" },
-                "PolicyDocument": {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        { "Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream" , "logs:PutLogEvents"], "Resource": "arn:aws:logs:*:*:*" }
-                    ]
-                }
-            }]
+            "DependsOn" : [
+                KW['IamInstanceProfile']
+            ]
         }
-    }
-
-def resource_lambda_permission(name,event):
-    return {
-        "Type": "AWS::Lambda::Permission",
-        "Properties": {
-            "FunctionName": { "Ref": name },
-            "Action": "lambda:InvokeFunction",
-            "Principal": "events.amazonaws.com",
-            "SourceArn": { "Fn::GetAtt": [event, "Arn"] }
-        }
-    }
-
-def resource_lambda_function_public_permission(name):
-    return {
-        "Type": "AWS::Lambda::Permission",
-        "Properties": {
-            "FunctionName": { "Ref": name },
-            "Action": "lambda:InvokeFunctionUrl",
-            "Principal": "*",
-            "FunctionUrlAuthType" : "NONE"
-        }
-    }
-
-def resource_natgateway(subnet,eip):
-    return {
-        "Type" : "AWS::EC2::NatGateway",
-        "Properties" : {
-            "AllocationId" : { "Fn::GetAtt" : [eip, "AllocationId"] },
-            "SubnetId" : { "Ref" : subnet },
-        }
-    }
-
-def resource_rds_subnetgroup(DBSubnetGroupDescription,subnets):
-    SubnetIds = []
-    for s in subnets:
-        SubnetIds.append({ "Ref" : s})
-    return {
-        "Type": "AWS::RDS::DBSubnetGroup",
-        "Properties": {
-            "DBSubnetGroupDescription" : DBSubnetGroupDescription,
-            "SubnetIds": SubnetIds,
-        }
-    }
-
-def resource_rds(name,username,password,sg):
-    return {
-        "Type": "AWS::RDS::DBInstance",
-        "Properties" : {
+    elif type == 'rds':
+        check(KW,'MasterUsername')
+        check(KW,"MasterUserPassword")
+        check(KW,"sg")
+        check(KW,'DBSubnetGroupName')
+        return {
+            "Type": "AWS::RDS::DBInstance",
+            "Properties" : {
                 "DBName" : name,
                 "AllocatedStorage": 20,
                 "DBInstanceClass" : "db.t3.micro",
                 "AutoMinorVersionUpgrade": True,
                 "Engine" : "mysql",
-                "MasterUsername" : { "Ref" : username },
-                "MasterUserPassword" : { "Ref" : password },
+                "MasterUsername" : { "Ref" : KW["MasterUsername"] },
+                "MasterUserPassword" : { "Ref" : KW['MasterUserPassword'] },
                 "MultiAZ" : False,
-                "VPCSecurityGroups" : [ { "Ref" : sg } ],
-                "DBSubnetGroupName" : { "Ref" : f"{name}SubnetGroup" } 
-         }
-
-    }
-
-def resource_s3():
-    return {
-        "Type": "AWS::S3::Bucket",
-        "Properties" : {
-            "AccessControl": "BucketOwnerFullControl",
-            "PublicAccessBlockConfiguration": {
-                "BlockPublicAcls": True,
-                "BlockPublicPolicy": True,
-                "IgnorePublicAcls": True,
-                "RestrictPublicBuckets": True
+                "VPCSecurityGroups" : [ { "Ref" : KW['sg'] } ],
+                "DBSubnetGroupName" : { "Ref" : KW['DBSubnetGroupName'] } 
             }
         }
-    }
-
-def resource_securitygroup(vpc):
-    return {
-        "Type": "AWS::EC2::SecurityGroup",
-        "Properties": {
-            "GroupDescription": "Security Group",
-            "SecurityGroupIngress" : [],
-            "SecurityGroupEgress" : [],
-            "VpcId": { "Ref": vpc }
-        }
-    }
-
-def resource_ssm_parameter(name,value):
-    return {
-        "Type": "AWS::SSM::Parameter",
-        "Properties": {
-            "Name": name,
-            "Value": value,
-            "Type": "String",
-            "Description": name,
-        }
-    }
-
-def resource_static():
-    return {
-        "Type": "AWS::S3::Bucket",
-        "Properties" : {
-            "AccessControl": "PublicRead",
-            "WebsiteConfiguration" : {
-                "IndexDocument": "index.html",
-                "ErrorDocument": "error.html"
-            }
-        },
-        "DeletionPolicy": "Delete"
-    }
-
-def resource_static_bucketPolicy(name):
-    return {
-        "Type": "AWS::S3::BucketPolicy",
-        "Properties": {
-            "Bucket": { "Ref" : name},
-            "PolicyDocument": {
-                "Version": "2012-10-17",
-                "Statement": {
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": "s3:GetObject",
-                    "Resource": { "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref": name }, "/*" ] ] },
-                }
-            }
-        },
-        "DependsOn" : [ name ]
-    }
-
-def resource_vpc(cidr):
-    return  {
-        "Type" : "AWS::EC2::VPC",
-        "Properties" : {
-            "CidrBlock" : cidr,
-            "EnableDnsHostnames" : True,
-            "EnableDnsSupport" : True,
-            "InstanceTenancy" : "default"
-        }
-    }
-
-def resource_vpc_subnet(vpc,cidr,az,extra):
-    v = {
-        "Type" : "AWS::EC2::Subnet",
-        "Properties" : {
-            "VpcId" : { "Ref" : vpc },
-            "CidrBlock" : cidr,
-            "AvailabilityZone" : {
-            "Fn::Select" : [ 
-                az, 
-                { 
-                "Fn::GetAZs" : "" 
-                } 
-            ]
+    elif type == 'dbsubnetgroup':
+        check(KW,"DBSubnetGroupDescription")
+        check(KW,'subnet')
+        SubnetIds = []
+        for s in KW['subnet']:
+            SubnetIds.append({ "Ref" : s})
+        return {
+            "Type": "AWS::RDS::DBSubnetGroup",
+            "Properties": {
+                "DBSubnetGroupDescription" : KW['DBSubnetGroupDescription'],
+                "SubnetIds": SubnetIds,
             }
         }
-    }
-
-    for x in extra:
-        v['Properties'][x] = extra[x]
-    return v
-
-def resource_vpc_igw():
-    return {
-        "Type" : "AWS::EC2::InternetGateway",
-        "Properties" : {}
-    }
-
-def resource_vpc_igw_attachment(igw,vpc):
-    return {
-        "Type" : "AWS::EC2::VPCGatewayAttachment",
-        "Properties" : {
-            "InternetGatewayId" : { "Ref" : igw },
-            "VpcId" : { "Ref" : vpc }
-        },
-    "DependsOn" : [ igw, vpc ],
-    }
-
-def resource_vpc_route_table(vpc):
-    return {
-        "Type" : "AWS::EC2::RouteTable",
-        "Properties" : {
-            "VpcId" : { "Ref" : vpc }
-        },
-        "DependsOn" : [ vpc ]
-    }
-
-def resource_vpc_default_route_igw(igw,routeTable):
-    return {
-        "Type" : "AWS::EC2::Route",
-        "Properties" : {
-            "RouteTableId" : { "Ref" :  routeTable  },
-            "DestinationCidrBlock" : "0.0.0.0/0",
-            "GatewayId" : { "Ref" : igw }
-        },
-        "DependsOn" : [ igw, routeTable ]
-    }
-
-def resource_vpc_default_route_natgateway(natgateway,routeTable):
-    return {
-        "Type" : "AWS::EC2::Route",
-        "Properties" : {
-            "RouteTableId" : { "Ref" :  routeTable  },
-            "DestinationCidrBlock" : "0.0.0.0/0",
-            "NatGatewayId" : { "Ref" : natgateway }
-        },
-        "DependsOn" : [ natgateway, routeTable ]
-    }
-
-def resource_vpc_subnet_route(subnet,route):
-    return {
-        "Type" : "AWS::EC2::SubnetRouteTableAssociation",
-        "Properties" : {
-            "RouteTableId" : { "Ref" : route },
-            "SubnetId" : { "Ref" : subnet }
-        },
-        "DependsOn" : [ route, subnet]
-    }
-
-def resource_target_group(name,vpc):
-    return {
-        "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
-        "Properties" : {
-            "Name" : name,
-            "HealthCheckEnabled" : True,
-            "HealthyThresholdCount" : 2,
-            "HealthCheckTimeoutSeconds" : 20,
-            #"HealthCheckProtocol" : "HTTP",
-            #"HealthCheckPort" : 80,
-            "VpcId" : { "Ref" : vpc },
-            "Port" : 80,
-            "Protocol" : "HTTP",
-            "Matcher" : {
-                "HttpCode" : "200,302"
-            }
-        }
-    }
-
-def resource_elbv2(SecurityGroups,Subnets):
-    ss = []
-    for s in Subnets:
-        ss.append({"Ref" : s })
-
-    return {
-        "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
-        "Properties" : {
-            "Scheme" : "internet-facing",
-            "SecurityGroups" : [ { "Ref" : SecurityGroups } ],
-            
-            "Subnets" : ss,
-            "Type" : "application"
-        }
-    }
-
-def resource_elbv2_listener(elbv2,targetGroup):
-    return {
-        "Type": "AWS::ElasticLoadBalancingV2::Listener",
-        "Properties": {
-            "DefaultActions": [],
-             "DefaultActions" : [{
-                "Type" : "forward",
-                "TargetGroupArn" : { "Ref" : targetGroup }
-            }],
-            "LoadBalancerArn": { "Ref": elbv2 },
-            "Port" : 80,
-            "Protocol" : "HTTP"
-            #"Port": 443,
-            #"Protocol": "HTTPS",
-            #"SslPolicy" : "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
-        }
-    }
-
-def resource_elbv2_listener_redirect(elbv2):
-    return {
-        "Type": "AWS::ElasticLoadBalancingV2::Listener",
-        "Properties": {
-            "DefaultActions": [
-                {
-                    "Type": "redirect",
-                    "RedirectConfig": {
-                        "Protocol": "HTTPS",
-                        "Port": 443,
-                        "Host": "#{host}",
-                        "Path": "/#{path}",
-                        "Query": "#{query}",
-                        "StatusCode": "HTTP_301"
+    elif type == 'lambdaexecutionrole':
+        return {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{ "Effect": "Allow", "Principal": {"Service": ["lambda.amazonaws.com"]}, "Action": ["sts:AssumeRole"] }]
+                },
+                "Path": "/",
+                "Policies": [{
+                    "PolicyName" : { "Fn::Sub": f"${{AWS::StackName}}-{name}" },
+                    "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            { "Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream" , "logs:PutLogEvents"], "Resource": "arn:aws:logs:*:*:*" }
+                        ]
                     }
-                }
-            ],
-            "LoadBalancerArn": { "Ref": elbv2 },
-            "Port": 80,
-            "Protocol": "HTTP"
+                }]
+            }
         }
-    }
-# =========================== Output Templates ===========================
+    elif type == 'lambda':
+        check(KW,'Role')
+        return {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Handler": "index.lambda_handler",
+                "Role": { "Fn::GetAtt": [ KW['Role'], "Arn" ] },
+                "Description" : name,
+                "Code": {
+                    "ZipFile":  { "Fn::Join": ["\n", [
+                        "import boto3",
+                        "def lambda_handler(event, context):",
+                        "    return { 'statusCode': 200, 'body': 'ok' }"
+                    ]]}
+                },
+                "Runtime": "python3.9",
+                "FunctionName": { "Fn::Sub": f"${{AWS::StackName}}-{name}" },
+                "Timeout": 300,
+                "TracingConfig": { "Mode": "Active" },
+                "Environment": {
+                    "Variables": {}
+                }
+            },
+            "DependsOn" : [ KW['Role'] ]
+        }
+    elif type == 'eventbridgeschedule':
+        check(KW,'cron')
+        check(KW,'target')
+        return {
+            "Type": "AWS::Events::Rule",
+            "Properties": {
+                "Description": f"Scheduled event to trigger the Lambda function {KW['target']}",
+                "ScheduleExpression" : KW['cron'],
+                "State": "ENABLED",
+                "Targets": [{ 
+                    "Arn": { "Fn::GetAtt": [ KW['target'], "Arn" ] },
+                    "Id" : { "Fn::Sub": f"${{AWS::StackName}}-{KW['target']}" }
+                } ]
+            }
+        }
+    elif type == 'lambdaeventbridgepermission':
+        check(KW,'target')
+        check(KW,'eventbridge')
+        return {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "FunctionName": { "Ref": KW['target'] },
+                "Action": "lambda:InvokeFunction",
+                "Principal": "events.amazonaws.com",
+                "SourceArn": { "Fn::GetAtt": [ KW['eventbridge'], "Arn"] }
+            },
+            "DependsOn" : [
+                KW['target'],
+                KW['eventbridge']
+            ]
+        }
+    elif type == 'functionurl':
+        check(KW,'target')
+        return {
+            "Type" : "AWS::Lambda::Url",
+            "Properties" : {
+                "AuthType" : "NONE",
+                "TargetFunctionArn" : { "Ref" : KW['target'] }
+            }
+        }
+    elif type == 'lambdafunctionurlpublicpermission':
+        check(KW,'target')
+        return {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "FunctionName": { "Ref": KW['target'] },
+                "Action": "lambda:InvokeFunctionUrl",
+                "Principal": "*",
+                "FunctionUrlAuthType" : "NONE"
+            }
+        }
+    elif type == 'ssmparameter':
+        check(KW,'value')
+        return {
+            "Type": "AWS::SSM::Parameter",
+            "Properties": {
+                "Name": name,
+                "Value": KW['value'],
+                "Type": "String",
+                "Description": name,
+            }
+        }
+    elif type == 'elbv2':
+        check(KW,'subnet')
+        check(KW,'SecurityGroups')
 
-def output_WebsiteURL(name):
-    return {
-        "Value" : { "Fn::GetAtt" : [ name, "WebsiteURL" ] },
-        "Description": "URL for website hosted on S3"
-    }
+        ss = []
+        for s in KW['subnet']:
+            ss.append({"Ref" : s })
 
-def policy_s3bucket(bucket):
-    return {
-        "Effect" : "Allow",
-        "Action" : [
-            "s3:GetObject",
-            "s3:PutObject",
-            "s3:DeleteObject",
-            "s3:ListBuckets"
-        ],
-        "Resource" : [
-            { "Fn::Sub": "arn:${AWS::Partition}:s3:::" + bucket + "/*" }
-        ]
-    }
+        return {
+            "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            "Properties" : {
+                "Scheme" : "internet-facing",
+                "SecurityGroups" : [ { "Ref" : KW['SecurityGroups'] } ],
+                
+                "Subnets" : ss,
+                "Type" : "application"
+            },
+            "DependsOn" : [
+                KW['SecurityGroups']
+            ]
+        }
+    elif type == 'elbv2listener':
+        check(KW,'TargetGroupArn')
+        check(KW,'LoadBalancerArn')
+        return {
+            "Type": "AWS::ElasticLoadBalancingV2::Listener",
+            "Properties": {
+                "DefaultActions": [],
+                "DefaultActions" : [{
+                    "Type" : "forward",
+                    "TargetGroupArn" : { "Ref" : KW['TargetGroupArn'] }
+                }],
+                "LoadBalancerArn": { "Ref": KW['LoadBalancerArn'] },
+                "Port" : 80,
+                "Protocol" : "HTTP"
+                #"Port": 443,
+                #"Protocol": "HTTPS",
+                #"SslPolicy" : "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
+            },
+            "DependsOn" : [
+                KW['TargetGroupArn'],
+                KW['LoadBalancerArn']
+            ]
+        }
+    elif type == 'elbv2listenerredirect':
+        check(KW,'LoadBalancerArn')
+        return {
+            "Type": "AWS::ElasticLoadBalancingV2::Listener",
+            "Properties": {
+                "DefaultActions": [
+                    {
+                        "Type": "redirect",
+                        "RedirectConfig": {
+                            "Protocol": "HTTPS",
+                            "Port": 443,
+                            "Host": "#{host}",
+                            "Path": "/#{path}",
+                            "Query": "#{query}",
+                            "StatusCode": "HTTP_301"
+                        }
+                    }
+                ],
+                "LoadBalancerArn": { "Ref": KW['LoadBalancerArn'] },
+                "Port" : 80,
+                "Protocol" : "HTTP"
+                #"Port": 443,
+                #"Protocol": "HTTPS",
+                #"SslPolicy" : "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
+            },
+            "DependsOn" : [
+                KW['LoadBalancerArn']
+            ]
+        }
+    elif type == 'dynamodb':
+        return {
+            "Type" : "AWS::DynamoDB::Table",
+            "Properties" : {
+                "AttributeDefinitions" : [ {'AttributeName': 'id', 'AttributeType': 'S'} ],
+                "KeySchema" : [ {'AttributeName': 'id', 'KeyType': 'HASH'} ],
+                "ProvisionedThroughput" : {
+                    "ReadCapacityUnits" : "5",
+                    "WriteCapacityUnits" : "5"
+                },
+                "TableName" : name,
+                "Tags" : [{
+                    "Key" : "Name",
+                    "Value" : name
+                }],
+            }
+        }
+    elif type == 'policydynamodb':
+        check(KW,'TableName')
 
-def policy_ssm_parameter(parameter):
-    return {
-        "Effect" : "Allow",
-        "Action" : [
-            "ssm:GetParameter",
-        ],
-        "Resource" : [
-            { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/" + parameter }
-        ]
-    }
+        return {
+            "Effect" : "Allow",
+            "Action" : [
+                "dynamodb:DeleteItem",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:Scan",
+                "dynamodb:Query",
+                "dynamodb:UpdateItem"
+            ],
+            "Resource": { "Fn::Join": [ "", [ "arn:" , { "Ref" : "AWS::Partition"} , ":dynamodb:" , { "Ref" : "AWS::Region"} , ":" , { "Ref" : "AWS::AccountId"} , ":table/", { "Ref" : KW['TableName'] } ] ] }
+        }
+    elif type == 'policys3bucket':
+        check(KW,'Bucket')
+
+        return {
+            "Effect" : "Allow",
+            "Action" : [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBuckets"
+            ],
+
+            "Resource": { "Fn::Join": [ "", [ "arn:" , { "Ref" : "AWS::Partition"} , ":s3:::", { "Ref" : KW['Bucket'] }, "/*" ] ] },
+        }
+    elif type == 'policyssmparameter':
+        check(KW,'parameter')
+        return {
+            "Effect" : "Allow",
+            "Action" : [
+                "ssm:GetParameter",
+            ],
+            "Resource" : [
+                { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/" + KW['parameter'] }
+            ]
+        }
+    elif type == 'outputfnatt':
+        check(KW,'attribute')
+        check(KW,'description')
+        return {
+            "Value" : { "Fn::GetAtt" : [ name, KW['attribute'] ] },
+            "Description": KW['description']
+        }
+    elif type == 'parameterlatestamiid':
+        return {
+            "Type" : "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+            "Default" : "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2",
+            "Description" : "Path to the SSM Parameter that contains the latest Amazon Linux 2 image ID"
+        }
+    elif type == 'parameter':
+        check(KW,'Type')
+        check(KW,'description')
+        if not 'NoEcho' in KW:
+            KW['NoEcho'] = False
+
+        return {
+            "Type" : KW['Type'],
+            "Description" : KW['description'],
+            "NoEcho"        : KW['NoEcho']
+        }
+    else:
+        log("FATAL",f"Unknown resource type - {type}")
+   
+   
 # =========================== Other code procedures ===========================
 
 def log(e,t):
@@ -554,6 +642,7 @@ def log(e,t):
         print("---------------------------------------")
 
     if e == "FATAL":
+        input()
         exit(1)
 
 def findResources(cf,res):
@@ -631,6 +720,7 @@ def securityGroupRule(cf,cidr,tcp,udp):
 
             rule['SourceSecurityGroupId'] = { "Ref" : cidr }
 
+    log('INFO',' - Adding security group rule')
     return rule
 
 def main():
@@ -712,37 +802,25 @@ def main():
         log("",f"Adding resources type {resource} - {name}")
 
         if resource == 'vpc':
-            if not args.cidr:
-                log("FATAL","Provide the CIDR range for this VPC")
-            cloudFormation['Resources'][name] = resource_vpc(args.cidr)
-            cloudFormation['Resources'][f"{name}InternetGateway"] = resource_vpc_igw()
-            cloudFormation['Resources'][f"{name}InternetGatewayAttachment"] = resource_vpc_igw_attachment(f"{name}InternetGateway",name)
-            cloudFormation['Resources'][f"{name}RouteTableInternetGateway"] = resource_vpc_route_table(name)
-            cloudFormation['Resources'][f"{name}RouteInternetGateway"] = resource_vpc_default_route_igw(f"{name}InternetGateway",f"{name}RouteTableInternetGateway")
+            cloudFormation['Resources'][name] = resourceTemplate(name,'vpc',cidr = args.cidr)
+            cloudFormation['Resources'][f"{name}InternetGateway"] = resourceTemplate(f"{name}InternetGateway",'igw')
+            cloudFormation['Resources'][f"{name}InternetGatewayAttachment"] = resourceTemplate(f"{name}InternetGatewayAttachment","igwattachment",vpc = name, InternetGatewayId = f"{name}InternetGateway")
+            cloudFormation['Resources'][f"{name}RouteTableInternetGateway"] = resourceTemplate(f"{name}RouteTableInternetGateway","routetable",vpc = name)
+            cloudFormation['Resources'][f"{name}RouteInternetGateway"] = resourceTemplate(f"{name}RouteInternetGateway","routeigw",InternetGatewayId = f"{name}InternetGateway",RouteTableId = f"{name}RouteTableInternetGateway")       
         elif resource == 'publicsubnet':
-            if not args.cidr:
-                log("FATAL","Provide the CIDR range for this subnet")
-            if not args.az:
-                log("FATAL","Provide the AZ (-az) to use (use 0,1,2 - this is an array reference)")
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
             RouteTable = resourceSelector(cloudFormation,args.routetable,"AWS::EC2::RouteTable")
-            cloudFormation['Resources'][f"{name}"] = resource_vpc_subnet(vpc,args.cidr,args.az,{ "MapPublicIpOnLaunch" : True})
-            cloudFormation['Resources'][f"{name}Route"] = resource_vpc_subnet_route(f"{name}",RouteTable)
+            cloudFormation['Resources'][f"{name}"] = resourceTemplate(name,"subnet",vpc = vpc, cidr = args.cidr, az = args.az,MapPublicIpOnLaunch = True )
+            cloudFormation['Resources'][f"{name}Route"] = resourceTemplate(f"{name}Route","subnetroute",RouteTableId = RouteTable, SubnetId = name)     
         elif resource == 'privatesubnet':
-            if not args.cidr:
-                log("FATAL","Provide the CIDR range for this VPC")
-            if not args.az:
-                log("FATAL","Provide the AZ (-az) to use (use 0,1,2 - this is an array reference)")
-            
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
             RouteTable = resourceSelector(cloudFormation,args.routetable,"AWS::EC2::RouteTable")
-
-            cloudFormation['Resources'][f"{name}"] = resource_vpc_subnet(vpc,args.cidr,args.az,{})
-            cloudFormation['Resources'][f"{name}Route"] = resource_vpc_subnet_route(f"{name}",RouteTable)
+            cloudFormation['Resources'][f"{name}"] = resourceTemplate(name,"subnet",vpc = vpc, cidr = args.cidr, az = args.az,MapPublicIpOnLaunch = False )
+            cloudFormation['Resources'][f"{name}Route"] = resourceTemplate(f"{name}Route","subnetroute",RouteTableId = RouteTable, SubnetId = name)
         elif resource == 'securitygroup':
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC","VpcId","AWS::EC2::VPC::Id")
             if not name in cloudFormation['Resources']:
-                cloudFormation['Resources'][name] = resource_securitygroup(vpc)
+                cloudFormation['Resources'][name] = resourceTemplate(name,'securitygroup',vpc = vpc)
 
             if args.ingress:
                 cloudFormation['Resources'][name]['Properties']['SecurityGroupIngress'].append(
@@ -753,41 +831,36 @@ def main():
                     securityGroupRule(cloudFormation,args.egress,args.tcp,args.udp)
                 )
         elif resource == 's3':
-            cloudFormation['Resources'][name] = resource_s3()
+            cloudFormation['Resources'][name] = resourceTemplate(name,'s3')
         elif resource == 'ec2':
             subnet = resourceSelector(cloudFormation,args.subnet,"AWS::EC2::Subnet",f"{name}Subnet","AWS::EC2::Subnet::Id")
             mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
             
-            cloudFormation['Parameters']['LatestAmiId'] = parameter_LatestAmiId()
-            cloudFormation['Resources'][f"{name}ec2Role"] = resource_ec2Role()
-            cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resource_ec2InstanceProfile(f"{name}ec2Role")
-            cloudFormation['Resources'][name] = resource_ec2Instance(name,f"{name}ec2InstanceProfile",'LatestAmiId',mySG,subnet)
+            cloudFormation['Parameters']['LatestAmiId'] = resourceTemplate(None,'parameterlatestamiid')
+            cloudFormation['Resources'][f"{name}ec2Role"] = resourceTemplate(f"{name}ec2Role","ec2role")
+            cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resourceTemplate(f"{name}ec2InstanceProfile","instanceprofile",Role = f"{name}ec2Role")
+            cloudFormation['Resources'][name] = resourceTemplate(name,'ec2instance',IamInstanceProfile = f"{name}ec2InstanceProfile", ImageId = 'LatestAmiId',SecurityGroup = mySG,Subnet = subnet)
         elif resource == 'static':
-            cloudFormation['Resources'][name] = resource_static()
-            cloudFormation['Resources'][f"{name}bucketPolicy"] = resource_static_bucketPolicy(name)
-            cloudFormation['Outputs'][name] = {
-                "Value" : { "Fn::GetAtt" : [ name, "WebsiteURL" ] },
-                "Description": "URL for website hosted on S3"
-            }
-    
+            cloudFormation['Resources'][name] = resourceTemplate(name,'static')
+            cloudFormation['Resources'][f"{name}bucketPolicy"] = resourceTemplate(f"{name}bucketPolicy",'staticbucketpolicy',Bucket = name)
+            cloudFormation['Outputs'][name] = resourceTemplate(name,'outputfnatt',attribute = 'WebsiteURL', description = "URL for website hosted on S3" )              
         elif resource == 'natgateway':
             subnet = resourceSelector(cloudFormation,args.subnet,"AWS::EC2::Subnet")
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC")
             
-            cloudFormation['Resources'][f"{name}ElasticIP"] = resource_eip()
-            cloudFormation['Resources'][name] = resource_natgateway(subnet,f"{name}ElasticIP")
-            cloudFormation['Resources'][f"{name}RouteTableNATGateway"] = resource_vpc_route_table(vpc)
-            cloudFormation['Resources'][f"{name}RouteNATGateway"] = resource_vpc_default_route_natgateway(f"{name}",f"{name}RouteTableNATGateway")
+            cloudFormation['Resources'][f"{name}ElasticIP"] = resourceTemplate(f"{name}ElasticIP",'eip')
+            cloudFormation['Resources'][name] = resourceTemplate(name,"natgateway",subnet = subnet, eip = f"{name}ElasticIP")
+            cloudFormation['Resources'][f"{name}RouteTableNATGateway"] = resourceTemplate(f"{name}RouteTableNATGateway","routetable",vpc = vpc)
+            cloudFormation['Resources'][f"{name}RouteNATGateway"] = resourceTemplate(f"{name}RouteNATGateway","routenatgw", NatGatewayId = name, RouteTableId = f"{name}RouteTableNATGateway")      
         elif resource == 'lambda':
-            cloudFormation['Resources'][name] = resource_lambda(name)
-            cloudFormation['Resources'][f"{name}ExecutionRole"] = resource_lambda_ExecutionRole(name)
-            log("INFO",f'Create a file called {name}.py to cause cfh to update the code automatically')
+            cloudFormation['Resources'][name] = resourceTemplate(name,'lambda',Role = f"{name}ExecutionRole")
+            cloudFormation['Resources'][f"{name}ExecutionRole"] = resourceTemplate(f"{name}ExecutionRole","lambdaexecutionrole")
         elif resource == 'launchtemplate':
             mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
-            cloudFormation['Parameters']['LatestAmiId'] = parameter_LatestAmiId()
-            cloudFormation['Resources'][f"{name}ec2Role"] = resource_ec2Role()
-            cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resource_ec2InstanceProfile(f"{name}ec2Role")
-            cloudFormation['Resources'][f"{name}"] = resource_ec2LaunchTemplate(name,f"{name}ec2InstanceProfile","LatestAmiId",mySG)
+            cloudFormation['Parameters']['LatestAmiId'] = resourceTemplate(None,'parameterlatestamiid')
+            cloudFormation['Resources'][f"{name}ec2Role"] = resourceTemplate(f"{name}ec2Role","ec2role")
+            cloudFormation['Resources'][f"{name}ec2InstanceProfile"] = resourceTemplate(f"{name}ec2InstanceProfile","instanceprofile",Role = f"{name}ec2Role")
+            cloudFormation['Resources'][f"{name}"] = resourceTemplate(name,'launchtemplate',IamInstanceProfile = f"{name}ec2InstanceProfile", ImageId = "LatestAmiId", SecurityGroup = mySG)
         elif resource == 'autoscaling':
             vpc = resourceSelector(cloudFormation,args.vpc,"AWS::EC2::VPC","VpcId","AWS::EC2::VPC::Id")
             subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
@@ -795,67 +868,51 @@ def main():
             VPCZoneIdentifier = []
             for x in subnets:
                 VPCZoneIdentifier.append({"Ref" : x })
-            cloudFormation['Resources'][f"{name}TargetGroup"] = resource_target_group(name,vpc)
-            cloudFormation['Resources'][f"{name}AutoScaling"] = resource_autoscaling(name,lt,VPCZoneIdentifier,f"{name}TargetGroup")
-            
+            cloudFormation['Resources'][f"{name}TargetGroup"] = resourceTemplate(name,'targetgroup',vpc = vpc)
+            cloudFormation['Resources'][f"{name}AutoScaling"] = resourceTemplate(f"{name}AutoScaling",'autoscaling',VPCZoneIdentifier = VPCZoneIdentifier, LaunchTemplateId = lt, TargetGroupARNs = f"{name}TargetGroup")          
         elif resource == 'elbv2':
             mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
             subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
             target = resourceSelector(cloudFormation,args.target,"AWS::ElasticLoadBalancingV2::TargetGroup")
 
-            cloudFormation['Resources'][name] = resource_elbv2(mySG,subnets)
-            cloudFormation['Resources'][f"{name}Listener"] = resource_elbv2_listener(name,target)
-            #cloudFormation['Resources'][f"{name}ListenerRedirect"] = resource_elbv2_listener_redirect(name)
-            cloudFormation['Outputs'][name] = {
-                "Value" : { "Fn::GetAtt" : [ name, "DNSName" ] },
-                "Description": "URL for application load balancer"
-            }
-
-        elif resource == "parameter":
-            cloudFormation['Parameters'][name] = parameter_String(name)
+            cloudFormation['Resources'][name] = resourceTemplate(name,'elbv2',SecurityGroups = mySG, subnet = subnets)
+            cloudFormation['Resources'][f"{name}Listener"] = resourceTemplate(f"{name}Listener",'elbv2listener', LoadBalancerArn = name,TargetGroupArn = target)
+            
+            cloudFormation['Outputs'][name] = resourceTemplate(name,'outputfnatt',attribute = 'DNSName', description = "URL for application load balancer" )
+        elif resource == 'parameter':
+            cloudFormation['Parameters'][name] = resourceTemplate(name,'parameter', description = name, Type = "String")
         elif resource == 'eventbridge':
-            if not args.cron:
-                log("FATAL","eventbridge needs a -cron parameter")
-            
-            if not args.target:
-                log("FATAL","eventbridge needs a -target parameter")
-            
             # -- confirm that target actually exists
             if cloudFormation['Resources'].get(args.target,{})['Type'] == "AWS::Lambda::Function":
-                cloudFormation['Resources'][name] = resource_eventbridge_schedule(args.target,args.cron)
-                cloudFormation['Resources'][f"{name}lambdaPermission"] = resource_lambda_permission(args.target,name)
+                cloudFormation['Resources'][name] = resourceTemplate(name,'eventbridgeschedule',cron = args.cron, target = args.target)
+                cloudFormation['Resources'][f"{name}lambdaPermission"] = resourceTemplate(f"{name}lambdaPermission","lambdaeventbridgepermission",target = args.target, eventbridge = name)
             else:
                 log("FATAL","event bridge -target does not exist or is not a Lambda function")
         elif resource == 'functionurl':
-            if not args.target:
-                log("FATAL","functionurl needs a -targe parameter")
-
-            cloudFormation['Resources'][name] = resource_functionurl(args.target)
-            cloudFormation['Resources'][f"{name}permission"] = resource_lambda_function_public_permission(name)
+            cloudFormation['Resources'][name] = resourceTemplate(name,'functionurl',target = args.target)
+            cloudFormation['Resources'][f"{name}permission"] = resourceTemplate(f"{name}permission","lambdafunctionurlpublicpermission",target = name)
             cloudFormation['Outputs'][name] = {
                 "Value" : { "Fn::GetAtt" : [ name, "FunctionUrl" ] },
                 "Description": "URL for Lambda function"
             }
         elif resource == 'ssmparameter':
-            if not args.value:
-                log("FATAL","Missing -value parameter")
-            cloudFormation['Resources'][name] = resource_ssm_parameter(name,args.value)
+            cloudFormation['Resources'][name] = resourceTemplate(name,'ssmparameter',value = args.value)
         elif resource == 'rds':
-            cloudFormation['Parameters'][f"{name}MasterUserName"] = parameter_String(f"{name}MasterUserName")
-            cloudFormation['Parameters'][f"{name}MasterPassword"] = parameter_String(f"{name}MasterPassword")
+            cloudFormation['Parameters'][f"{name}MasterUsername"] = resourceTemplate(f"{name}MasterUsername",'parameter', description = f"{name}MasterUsername", Type = "String")
+            cloudFormation['Parameters'][f"{name}MasterUserPassword"] = resourceTemplate(f"{name}MasterUserPassword",'parameter', description = f"{name}MasterUserPassword", Type = "String", NoEcho = True)
 
             subnets = resourceSelector(cloudFormation,args.subnet,'AWS::EC2::Subnet',f"{name}Subnets","List<AWS::EC2::Subnet::Id>").split(',')
             mySG = resourceSelector(cloudFormation,args.sg,"AWS::EC2::SecurityGroup",f"{name}SecurityGroup","AWS::EC2::SecurityGroup::Id")
 
-            cloudFormation['Resources'][name] = resource_rds(name,f"{name}MasterUserName",f"{name}MasterPassword",mySG)
-            cloudFormation['Resources'][f"{name}SubnetGroup"] = resource_rds_subnetgroup(name,subnets)
+            cloudFormation['Resources'][name] = resourceTemplate(name,'rds',MasterUsername = f"{name}MasterUsername",MasterUserPassword = f"{name}MasterUserPassword", sg = mySG, DBSubnetGroupName = f"{name}SubnetGroup")
+            cloudFormation['Resources'][f"{name}SubnetGroup"] = resourceTemplate(f"{name}SubnetGroup",'dbsubnetgroup',DBSubnetGroupDescription = name, subnet = subnets)
 
             cloudFormation['Outputs'][name] = {
                 "Value" : { "Fn::GetAtt" : [ name, "Endpoint.Address" ] },
                 "Description": "Database Endpoint"
             }
-
-
+        elif resource == 'dynamodb':
+            cloudFormation['Resources'][name] = resourceTemplate(name,'dynamodb')
         else:
             log("FATAL",f"Unknown resource type - {resource}")
             
@@ -873,26 +930,33 @@ def main():
         
     # == Update the code for all Lambda function
     for name in cloudFormation['Resources']:
-        if cloudFormation['Resources'][name]['Type'] == 'AWS::Lambda::Function':            
+        if cloudFormation['Resources'][name]['Type'] == 'AWS::Lambda::Function':
+            log("INFO",f"Lambda code update for {name}")
             if os.path.exists(f"{name}.py"):
-                log("INFO",f"Found {name}.py - Updating Lambda function {name}")
+                log("INFO",f" - Found {name}.py - Updating")
                 # TODO - if the file is too big, Lambda will not update it
+                pc = []
                 with open(f"{name}.py",'rt') as C:
-                    pc = C.readlines()
-                    cloudFormation['Resources'][name]['Properties']['Code']['ZipFile'] =  { "Fn::Join": ["", pc ]}
+                    for x in C.readlines():
+                        pc.append(x.strip())
+                    cloudFormation['Resources'][name]['Properties']['Code']['ZipFile'] =  { "Fn::Join": ["\n", pc ]}
+            else:
+                log("WARNING",f' - Create a file called {name}.py to cause cfh to update the code automatically')
 
     # == Update EC2 Launch Template UserData
     for name in cloudFormation['Resources']:
         if os.path.exists(f"{name}.sh"):
+            pc = []
             with open(f"{name}.sh",'rt') as C:
-                pc = C.readlines()
+                for x in C.readlines():
+                    pc.append(x.strip())
 
             if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::LaunchTemplate':
                 log("INFO",f"Found {name}.sh - Updating Launch Template User Data {name}")
-                cloudFormation['Resources'][name]['Properties']['LaunchTemplateData']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "", pc ] } }
+                cloudFormation['Resources'][name]['Properties']['LaunchTemplateData']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "\n", pc ] } }
             if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::Instance':
                 log("INFO",f"Found {name}.sh - Updating EC2 User Data {name}")
-                cloudFormation['Resources'][name]['Properties']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "", pc ] } }
+                cloudFormation['Resources'][name]['Properties']['UserData'] = { "Fn::Base64": {"Fn::Join": [ "\n", pc ] } }
 
     # == link resources to each other
     if args.link:
@@ -912,7 +976,7 @@ def main():
                 log("INFO",f"Linking S3 ({args.link[0]}) to EC2 Role ({args.link[1]})")
                 x = cloudFormation['Resources'][f"{args.link[1]}ec2Role"]['Properties']['AssumeRolePolicyDocument']['Statement']
                 
-                p = policy_s3bucket(args.link[0])
+                p = resourceTemplate(None, 'policys3bucket', Bucket = args.link[0])
                 
                 if not p in x:
                     log("WARNING","Updating policy")
@@ -920,41 +984,38 @@ def main():
                 else:
                     log("INFO","Policy unchanged")
 
-            # -- linking s3 to lambda
-            if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::S3::Bucket' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
-                log("INFO",f"Linking S3 ({args.link[0]}) to Lambda ({args.link[1]})")
+            # -- linking x to lambda
+            if cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
+                
+                # -- find the Lambda execution policy
+                ExecutionRole = cloudFormation['Resources'][args.link[1]]['Properties']['Role']['Fn::GetAtt'][0]
+                # -- update the Lambda Execution Role policy
+                x = cloudFormation['Resources'][ExecutionRole]['Properties']['Policies'][0]['PolicyDocument']['Statement']
 
+                if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::DynamoDB::Table':
+                    log("INFO",f"Linking DynamoDb ({args.link[0]}) to Lambda ({args.link[1]})")
+                    p = resourceTemplate(None, 'policydynamodb', TableName = args.link[0])
+
+                if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::S3::Bucket':
+                    log("INFO",f"Linking S3 ({args.link[0]}) to Lambda ({args.link[1]})")
+                    p = resourceTemplate(None, 'policys3bucket', Bucket = args.link[0])
+
+                if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::SSM::Parameter':
+                    log("INFO",f"Linking SSM Parameter ({args.link[0]}) to Lambda ({args.link[1]})")
+                    p = resourceTemplate(None, 'policyssmparameter', parameter = args.link[0])
+
+                if not p in x:
+                    log("WARNING","Updating policy")
+                    x.append(p)
+                else:
+                    log("INFO","Policy unchanged")
+                
                 # -- update the Lambda variable
                 cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = { "Ref" : args.link[0] } 
-                
-                # -- update the Lambda Execution Role policy
-                x = cloudFormation['Resources'][f"{args.link[1]}ExecutionRole"]['Properties']['Policies'][0]['PolicyDocument']['Statement']
 
-                p = policy_s3bucket(args.link[0])
-                
-                if not p in x:
-                    log("WARNING","Updating policy")
-                    x.append(p)
-                else:
-                    log("INFO","Policy unchanged")
-
-            # -- linking ssm parameter to lambda
-            if cloudFormation['Resources'][args.link[0]]['Type'] == 'AWS::SSM::Parameter' and cloudFormation['Resources'][args.link[1]]['Type'] == 'AWS::Lambda::Function':
-                log("INFO",f"Linking SSM Parameter ({args.link[0]}) to Lambda ({args.link[1]})")
-
-                # -- update the Lambda variable
-                cloudFormation['Resources'][args.link[1]]['Properties']['Environment']['Variables'][args.link[0]] = "{{resolve:ssm:" + args.link[0] + "}}" #{ "Ref" : args.link[0] } 
-                
-                # -- update the Lambda Execution Role policy
-                x = cloudFormation['Resources'][f"{args.link[1]}ExecutionRole"]['Properties']['Policies'][0]['PolicyDocument']['Statement']
-
-                p = policy_ssm_parameter(args.link[0])
-                
-                if not p in x:
-                    log("WARNING","Updating policy")
-                    x.append(p)
-                else:
-                    log("INFO","Policy unchanged")
+                # -- Add it into the DependsOn (if it's not already there)
+                if args.link[0] not in cloudFormation['Resources'][args.link[1]]['DependsOn']:
+                    cloudFormation['Resources'][args.link[1]]['DependsOn'].append(args.link[0])
 
             #else:
                 #log("FATAL","Unsupported linking direction")
@@ -968,27 +1029,26 @@ def main():
         Q.write(result)
 
     if args.updatestack:
+        Parameters = []
+        for ParameterKey in cloudFormation['Parameters']:
+            Parameters.append({
+                "ParameterKey" : ParameterKey,
+                "UsePreviousValue" : True
+            })
+        
         log("WARNING","====================================================================")
         log("WARNING",f"UPDATING CLOUDFORMATION STACK - {args.updatestack}")
         response = boto3.client('cloudformation').update_stack(  
             StackName = args.updatestack,
             TemplateBody = result,  
-            Capabilities = ['CAPABILITY_IAM']  
+            Capabilities = ['CAPABILITY_IAM'],
+            Parameters = Parameters
         )
         if 'StackId' in response:
             log("INFO",response['StackId'])
         else:
             print(response)
         log("WARNING","====================================================================")
-
-    # print("-----------------------")
-    # print("To update your stack, run:")
-    # print("")
-    # print(f"aws cloudformation update-stack --template-body file://{args.cf} --capabilities CAPABILITY_IAM --stack-name YOURSTACKNAME")
-    # print("")
-    # print("To create a new stack, run:")
-    # print("")
-    # print(f"aws cloudformation create-stack --template-body file://{args.cf} --capabilities CAPABILITY_IAM --stack-name YOURSTACKNAME")
 
 if __name__ == '__main__':
     main()
