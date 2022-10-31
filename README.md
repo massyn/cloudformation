@@ -1,7 +1,7 @@
 # CloudFormation Helper
 Cloudformation Helper script
 
-[![Publish](https://github.com/massyn/cloudformation/actions/workflows/test.yml/badge.svg)](https://github.com/massyn/cloudformation/actions/workflows/test.yml)
+[![Testing](https://github.com/massyn/cloudformation/actions/workflows/test.yml/badge.svg)](https://github.com/massyn/cloudformation/actions/workflows/test.yml)
 
 ## What is CloudFormation Helper?
 
@@ -70,7 +70,7 @@ CFH will check if a file called `{name}.sh` exists - if it does, it will replace
 
 ## Use cases
 
-    WARNING - These examples are provided to demonstrate the capabilities of the tool.  You do run the risk of creating stacks that will most likely cost you money, so be careful what you deploy on your AWS accounts.  Components like the NAT Gateway are NOT free, and if you happen to leave it running, you will incur charges.
+> WARNING - These examples are provided to demonstrate the capabilities of the tool.  You do run the risk of creating stacks that will most likely cost you money, so be careful what you deploy on your AWS accounts.  Components like the NAT Gateway are NOT free, and if you happen to leave it running, you will incur charges.
 
 ### Serverless function to harvest data from a URL
 
