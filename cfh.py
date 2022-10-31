@@ -642,7 +642,7 @@ def log(e,t):
         print("---------------------------------------")
 
     if e == "FATAL":
-        input()
+        #input()
         exit(1)
 
 def findResources(cf,res):

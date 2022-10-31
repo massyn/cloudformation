@@ -48,4 +48,12 @@ jobs:
           python cfh.py -cf test.json -add launchtemplate LaunchTemplate -sg SGWebInbound
           python cfh.py -cf test.json -add autoscaling myAutoscalingGroup -lt LaunchTemplate -subnet myPrivateSubnetA,myPrivateSubnetB -vpc myVPC
           python cfh.py -cf test.json -add elbv2 myELBv2 -sg SGWebInbound -subnet myPublicSubnetA,myPublicSubnetB
+          # -- test serverless function
+          python cfh.py -cf test.json -add lambda usecase1lambda
+          python cfh.py -cf test.json -add functionurl myFunctionUrl -target usecase1lambda
+          python cfh.py -cf test.json -add dynamodb myDynamoDbTable
+          python cfh.py -cf test.json -add static myStaticS3
+          python cfh.py -cf test.json -add eventbridge myEventBridge -cron "rate(5 minutes)" -target usecase2lambda
+          python cfh.py -cf test.json -add parameter websiteMessage
+          python cfh.py -cf test.json -add ssmparameter mySSMParameterStore -value "Hello there!"
                     
