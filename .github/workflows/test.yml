@@ -53,6 +53,7 @@ jobs:
           python cfh.py -cf test.json -add functionurl myFunctionUrl -target usecase1lambda
           python cfh.py -cf test.json -add dynamodb myDynamoDbTable
           python cfh.py -cf test.json -add static myStaticS3
+          python cfh.py -cf test.json -add lambda usecase2lambda
           python cfh.py -cf test.json -add eventbridge myEventBridge -cron "rate(5 minutes)" -target usecase2lambda
           python cfh.py -cf test.json -add parameter websiteMessage
           python cfh.py -cf test.json -add ssmparameter mySSMParameterStore -value "Hello there!"

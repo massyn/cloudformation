@@ -883,7 +883,7 @@ def main():
             cloudFormation['Parameters'][name] = resourceTemplate(name,'parameter', description = name, Type = "String")
         elif resource == 'eventbridge':
             # -- confirm that target actually exists
-            if cloudFormation['Resources'].get(args.target,{})['Type'] == "AWS::Lambda::Function":
+            if cloudFormation['Resources'].get(args.target,{}).get('Type','') == "AWS::Lambda::Function":
                 cloudFormation['Resources'][name] = resourceTemplate(name,'eventbridgeschedule',cron = args.cron, target = args.target)
                 cloudFormation['Resources'][f"{name}lambdaPermission"] = resourceTemplate(f"{name}lambdaPermission","lambdaeventbridgepermission",target = args.target, eventbridge = name)
             else:
