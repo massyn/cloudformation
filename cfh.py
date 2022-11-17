@@ -938,7 +938,7 @@ def main():
                 pc = []
                 with open(f"{name}.py",'rt') as C:
                     for x in C.readlines():
-                        pc.append(x.strip())
+                        pc.append(x.replace('\n',''))
                     cloudFormation['Resources'][name]['Properties']['Code']['ZipFile'] =  { "Fn::Join": ["\n", pc ]}
             else:
                 log("WARNING",f' - Create a file called {name}.py to cause cfh to update the code automatically')
@@ -949,7 +949,7 @@ def main():
             pc = []
             with open(f"{name}.sh",'rt') as C:
                 for x in C.readlines():
-                    pc.append(x.strip())
+                    pc.append(x.replace('\n',''))
 
             if cloudFormation['Resources'][name]['Type'] == 'AWS::EC2::LaunchTemplate':
                 log("INFO",f"Found {name}.sh - Updating Launch Template User Data {name}")
