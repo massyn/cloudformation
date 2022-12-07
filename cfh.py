@@ -729,6 +729,7 @@ def main():
     parser.add_argument('-add',help='Add a new resource to the CloudFormation file',nargs='+')
     parser.add_argument('-properties',help='Add a custom Properties value into the resource',nargs='+')
     parser.add_argument('-list',help='List the resources',action='store_true')
+    parser.add_argument('-nocode',help='Do not update the Lambda function code',action='store_true')
     parser.add_argument('-overwrite',help='Overwrite a resource',action='store_true')
     parser.add_argument('-link',help='Links one resource to another',nargs='+')
     parser.add_argument('-desc',help='Set a description for the CloudFormation file')
@@ -930,7 +931,7 @@ def main():
         
     # == Update the code for all Lambda function
     for name in cloudFormation['Resources']:
-        if cloudFormation['Resources'][name]['Type'] == 'AWS::Lambda::Function':
+        if cloudFormation['Resources'][name]['Type'] == 'AWS::Lambda::Function' and args.nocode == False:
             log("INFO",f"Lambda code update for {name}")
             if os.path.exists(f"{name}.py"):
                 log("INFO",f" - Found {name}.py - Updating")
