@@ -7,11 +7,15 @@ Cloudformation Helper script
 
 CloudFormation Helper is a tool to help you add resources to CloudFormation templates, create basic links between resources, or update code used in EC2 UserData, or Lambda functions.
 
-This tool uses no state files and does not know your AWS environment.  It is simply a tool that touches your CloudFormation json file by adding (or slightly modifying existing) resources.  The basic idea of the tool is to stand up some basic infrastructure, and allow you to then customise the CloudFormation template how you see fit.
+This tool uses no state files and does not know your AWS environment.  It is simply a tool that touches your CloudFormation json file by adding (or slightly modifying existing) resources.  The basic idea of the tool is to stand up some basic infrastructure and allow you to then customise the CloudFormation template how you see fit.
 
-It also has the built-in capability to update Lambda function code, or EC2 UserData, without requiring you manually edit the files.
+It also has the built-in capability to update Lambda function code, or EC2 UserData, without requiring you to manually edit the files.
 
 CFH is not intended to be a replacement for tools like Teraform or CDK, which are already much more advanced and mature than CFH.  This tool is for situations where the result is a CloudFormation template, and you require some assistance to add some resources to the template.  Instead of simply disregarding all the good work you've already done, where a need exists to create a new CloudFormation template from scratch, you can use CFH to do some of the heavy lifting for you.
+
+## Recipes
+
+Using CFH, you can find several pre-built [recipes](/recipes/README.md) that you can use in your environment.
 
 ## Caveats
 
@@ -39,6 +43,10 @@ CFH is not intended to be a replacement for tools like Teraform or CDK, which ar
 ### Updating Lambda functions code
 
 CFH will check if a file called `{name}.py` exists - if it does, it will replace the `Code` section of the template with the contents of this file.
+
+### Updatiing Lambda Execution Role Inline Policy
+
+As of 2024.06.09, if a file called `{name}.json` exists, it will append the policy into the lambda function's execution role as an inline policy.
 
 ### Updating EC2 UserData
 

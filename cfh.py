@@ -367,6 +367,26 @@ def resourceTemplate(name,type,**KW):
             }
         }
     elif type == 'lambdaexecutionrole':
+        # is there an inline policy?
+        policies = [
+            {
+                "PolicyName" : { "Fn::Sub": f"${{AWS::StackName}}-{name}" },
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        { "Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream" , "logs:PutLogEvents"], "Resource": "arn:aws:logs:*:*:*" }
+                    ]
+                }
+            }
+        ]
+        if os.path.exists(f"{name.replace('ExecutionRole','')}.json"):
+            print(f"- Found {name.replace('ExecutionRole','')}.json - Updating inline policy")
+            with open(f"{name.replace('ExecutionRole','')}.json",'rt') as qq:
+                policies.append({
+                    "PolicyName" : { "Fn::Sub": f"${{AWS::StackName}}-{name.replace('ExecutionRole','')}" },
+                    "PolicyDocument" : json.load(qq)
+                })
+
         return {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -375,15 +395,7 @@ def resourceTemplate(name,type,**KW):
                     "Statement": [{ "Effect": "Allow", "Principal": {"Service": ["lambda.amazonaws.com"]}, "Action": ["sts:AssumeRole"] }]
                 },
                 "Path": "/",
-                "Policies": [{
-                    "PolicyName" : { "Fn::Sub": f"${{AWS::StackName}}-{name}" },
-                    "PolicyDocument": {
-                        "Version": "2012-10-17",
-                        "Statement": [
-                            { "Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream" , "logs:PutLogEvents"], "Resource": "arn:aws:logs:*:*:*" }
-                        ]
-                    }
-                }]
+                "Policies": policies
             }
         }
     elif type == 'lambda':
