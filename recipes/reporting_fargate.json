@@ -1,0 +1,518 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Reporting platforms on Fargate",
+    "Mappings" : 
+        { "FargateMappings" : {
+            "256.1024"  : { "cpu" : 256  ,  "memory" : 1024 },
+            "256.2048"  : { "cpu" : 256  ,  "memory" : 2048 },
+            "512.2048"  : { "cpu" : 512  ,  "memory" : 2048 },
+            "1024.2048" : { "cpu" : 1024 ,  "memory" : 2048 },
+            "1024.4096" : { "cpu" : 1024 ,  "memory" : 4096 },
+            "2048.4096" : { "cpu" : 2048 ,  "memory" : 4096 },
+            "4096.8192" : { "cpu" : 4096 ,  "memory" : 8192 }
+        }
+    },
+    "Parameters": {
+        "CreateDatabase": {
+            "Type": "String",
+            "AllowedValues": ["True", "False"],
+            "Default": "True",
+            "Description": "Specify whether to create a database"
+        },
+        "DBSize": {
+            "Type": "Number",
+            "Default": 20,
+            "Description": "Specify the size of the database in GB"
+        },
+        "MultiAZ": {
+            "Type": "String",
+            "AllowedValues": ["True", "False"],
+            "Default": "False",
+            "Description": "Specify if Multi-AZ deployment for the database is required"
+        },
+        "DBInstanceClass": {
+            "Type": "String",
+            "Default": "db.t3.small",
+            "Description": "Database instance class",
+            "AllowedValues": [
+                "db.t3.micro",
+                "db.t3.small",
+                "db.t3.medium",
+                "db.t3.large",
+                "db.r5.large"
+            ]
+        },
+        "DesiredCount" : {
+            "Type" : "String",
+            "Default" : 1,
+            "Description" : "How many Fargate instances would you like to run?"
+        },
+        "DBName": {
+            "Type": "String",
+            "Default": "metabase",
+            "Description": "Database name"
+        },
+        "DBUsername": {
+            "Type": "String",
+            "Default": "metabase",
+            "Description": "Database admin username",
+            "NoEcho": "true"
+        },
+        "DBPassword": {
+            "Type": "String",
+            "Description": "Database admin password",
+            "NoEcho": "true"
+        },
+        "Image" : {
+            "Type" : "String",
+            "Description" : "Specify the Docker image to deploy",
+            "Default" : "metabase/metabase",
+            "AllowedValues" : [
+                "metabase/metabase",
+                "grafana/grafana-enterprise"
+            ]
+        },
+        "VpcId": {
+            "Type": "AWS::EC2::VPC::Id",
+            "Description": "The ID of the VPC where the container will be deployed"
+        },
+        "SubnetIds": {
+            "Type": "List<AWS::EC2::Subnet::Id>",
+            "Description": "The subnet IDs to use for the ALB."
+        },
+        "FargateSize" : {
+            "Description" : "The cpu / memory size to use for Fargate",
+            "Type" : "String",
+            "Default" : "1024.2048",
+            "AllowedValues" : [
+                "256.1024",
+                "256.2048",
+                "512.2048",
+                "1024.2048",
+                "1024.4096",
+                "2048.4096",
+                "4096.8192"
+            ]
+        }
+    },
+    "Conditions": {
+        "CreateDB": { "Fn::Equals": [ { "Ref": "CreateDatabase" }, "True" ] },
+        "UseMultiAZ": { "Fn::Equals": [ { "Ref": "MultiAZ" }, "True" ] }
+    },
+    "Resources": {
+        "SecurityGroupRDS": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Condition": "CreateDB",
+            "Properties": {
+                "GroupDescription": "Security group for RDS PostgreSQL instance",
+                "VpcId": { "Ref": "VpcId" },
+                "SecurityGroupIngress": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "SourceSecurityGroupId": { "Ref": "SecurityGroupECS" },
+                    "Description": "Allow PostgreSQL traffic from ECS task security group"
+                }
+                ],
+                "SecurityGroupEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "CidrIp": "0.0.0.0/0",
+                    "Description": "Allow all outbound traffic"
+                }
+                ]
+            }
+        },
+        "DBSubnetGroup": {
+            "Type": "AWS::RDS::DBSubnetGroup",
+            "Condition": "CreateDB",
+            "Properties": {
+                "DBSubnetGroupDescription": "Subnet group for Metabase database",
+                "SubnetIds": { "Ref": "SubnetIds" }
+            }
+        },
+        "RDSInstance": {
+            "Type": "AWS::RDS::DBInstance",
+            "Condition": "CreateDB",
+            "Properties": {
+                "DBName": { "Ref": "DBName" },
+                "Engine": "postgres",
+                "EngineVersion": "17.4",
+                "DBInstanceClass": { "Ref": "DBInstanceClass" },
+                "AllocatedStorage": { "Ref": "DBSize" },
+                "StorageType": "gp3",
+                "MasterUsername": { "Ref": "DBUsername" },
+                "MasterUserPassword": { "Ref": "DBPassword" },
+                "VPCSecurityGroups": [{ "Fn::GetAtt": ["SecurityGroupRDS", "GroupId"] }],
+                "DBSubnetGroupName": { "Ref": "DBSubnetGroup" },
+                "MultiAZ": { "Fn::If": ["UseMultiAZ", true, false] },
+                "PubliclyAccessible": false,
+                "BackupRetentionPeriod": 7,
+                "DeletionProtection": false
+            }
+        },
+        "DBSecretSecrets": {
+            "Type": "AWS::SecretsManager::Secret",
+            "Condition": "CreateDB",
+            "Properties": {
+                "Name": { "Fn::Sub": "${AWS::StackName}-db-credentials" },
+                "Description": "Database credentials",
+                "SecretString": {
+                "Fn::Join": [
+                    "",
+                    [
+                    "{\"username\":\"",
+                    { "Ref": "DBUsername" },
+                    "\",\"password\":\"",
+                    { "Ref": "DBPassword" },
+                    "\",\"engine\":\"postgres\",\"host\":\"",
+                    { "Fn::GetAtt": ["RDSInstance", "Endpoint.Address"] },
+                    "\",\"port\":\"5432\",\"dbname\":\"",
+                    { "Ref": "DBName" },
+                    "\"}"
+                    ]
+                ]
+                }
+            }
+        },
+        "SecurityGroupALB": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Allow inbound traffic to the ALB only",
+                "VpcId": { "Ref": "VpcId" },
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 80,
+                        "ToPort": 80,
+                        "CidrIp": "0.0.0.0/0",
+                        "Description": "Allow HTTP traffic from anywhere"
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 443,
+                        "ToPort": 443,
+                        "CidrIp": "0.0.0.0/0",
+                        "Description": "Allow HTTPS traffic from anywhere"
+                    }
+                ]
+            }
+        },
+        "SecurityGroupECS": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Allow ALB to communicate with the container",
+                "VpcId": { "Ref": "VpcId" },
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 3000,
+                        "ToPort": 3000,
+                        "SourceSecurityGroupId": { "Ref": "SecurityGroupALB" },
+                        "Description": "Allow traffic from the ALB only"
+                    }
+                ],
+                "SecurityGroupEgress": [
+                    {
+                        "IpProtocol": "-1",
+                        "CidrIp": "0.0.0.0/0",
+                        "Description": "Allow all outbound traffic to the internet"
+                    }
+                ]
+            }
+        },
+        "ECSService": {
+            "Type": "AWS::ECS::Service",
+            "DependsOn": ["ALBListener"],
+            "Properties": {
+                "Cluster": { "Ref": "ECSCluster" },
+                "TaskDefinition": { "Ref": "ECSTaskDefinition" },
+                "DesiredCount": { "Ref" : "DesiredCount"},
+                "LaunchType": "FARGATE",
+                "NetworkConfiguration": {
+                    "AwsvpcConfiguration": {
+                        "Subnets": { "Ref": "SubnetIds" },
+                        "SecurityGroups": [{ "Ref": "SecurityGroupECS" }],
+                        "AssignPublicIp": "ENABLED"
+                    }
+                },
+                "LoadBalancers": [
+                    {
+                        "ContainerName": { "Ref": "AWS::StackName" },
+                        "ContainerPort": 3000,
+                        "TargetGroupArn": { "Ref": "ALBTargetGroup" }
+                    }
+                ]
+            }
+        },
+        "ECSExecutionRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": { "Fn::Sub": "${AWS::StackName}-executionrole" },
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "ecs-tasks.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Policies": [
+                    { "Fn::If": [ "CreateDB", 
+                    {
+                    "PolicyName": "SecretsManagerAccess",
+                    "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": ["secretsmanager:GetSecretValue"],
+                            "Resource": { "Ref": "DBSecretSecrets" }
+                        }
+                        ]
+                    }
+                    }, 
+                    { "Ref": "AWS::NoValue" } 
+                ]}
+                ,
+                    {
+                        "PolicyName": "ECSTaskExecutionPolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
+                                    ],
+                                    "Resource": [
+                                        "arn:aws:logs:*:*:*"
+                                    ]
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "ecr:GetAuthorizationToken",
+                                        "ecr:BatchCheckLayerAvailability",
+                                        "ecr:GetDownloadUrlForLayer",
+                                        "ecr:GetRepositoryPolicy",
+                                        "ecr:DescribeRepositories",
+                                        "ecr:ListImages",
+                                        "ecr:DescribeImages",
+                                        "ecr:BatchGetImage",
+                                        "ecr:GetLifecyclePolicy",
+                                        "ecr:GetLifecyclePolicyPreview",
+                                        "ecr:ListTagsForResource",
+                                        "ecr:DescribeImageScanFindings"
+                                    ],
+                                    "Resource": "*"
+                                },
+                                {
+                                    "Effect" : "Allow",
+                                    "Action" : [
+                                        "kms:Decrypt"
+                                      ],
+                                      "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "ECSLogGroup": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::Sub": "/ecs/${AWS::StackName}"
+                },
+                "RetentionInDays": 7
+            }
+        },
+        "ECSTaskRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": { "Fn::Sub": "${AWS::StackName}-taskrole" },
+                "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "ecs-tasks.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                    }
+                ]
+                },
+                "Policies": [
+                
+                ],
+                "Path": "/",
+                "ManagedPolicyArns": [
+                "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+                ]
+            }
+        },
+        "ECSTaskDefinition": {
+            "Type": "AWS::ECS::TaskDefinition",
+            "Properties": {
+                "Family": {
+                    "Ref": "AWS::StackName"
+                },
+                "Cpu": { "Fn::FindInMap" : [ "FargateMappings", { "Ref" : "FargateSize" }, "cpu" ]},
+                "Memory": { "Fn::FindInMap" : [ "FargateMappings", { "Ref" : "FargateSize" }, "memory" ]},
+                "NetworkMode": "awsvpc",
+                "RuntimePlatform": {
+                    "CpuArchitecture": "X86_64",
+                    "OperatingSystemFamily": "LINUX"
+                },
+                "TaskRoleArn": { "Fn::GetAtt": [ "ECSTaskRole", "Arn" ] },
+                "RequiresCompatibilities": [
+                    "FARGATE"
+                ],
+                "ExecutionRoleArn": {
+                    "Fn::GetAtt": [
+                        "ECSExecutionRole",
+                        "Arn"
+                    ]
+                },
+                "ContainerDefinitions": [
+                    {
+                        "Name": {
+                            "Ref": "AWS::StackName"
+                        },
+                        "Image": { "Ref" : "Image" },
+                        "Essential": true,
+                        "PortMappings": [
+                            {
+                                "Protocol": "tcp",
+                                "ContainerPort" : 3000,
+                                "HostPort" : 3000
+                            }
+                        ],
+                        "LogConfiguration": {
+                            "LogDriver": "awslogs",
+                            "Options": {
+                                "awslogs-group": {
+                                    "Ref": "ECSLogGroup"
+                                },
+                                "awslogs-region": {
+                                    "Ref": "AWS::Region"
+                                },
+                                "awslogs-stream-prefix": {
+                                    "Ref": "AWS::StackName"
+                                }
+                            }
+                        },
+                        "Environment": { "Fn::If": [ "CreateDB", [
+                            { "Name": "MB_DB_TYPE"      , "Value": "postgres" },
+                            { "Name": "GF_DATABASE_TYPE", "Value": "postgres" },
+
+                            { "Name": "GF_DATABASE_SSL_MODE", "Value": "require" },
+                            { "Name": "MB_DB_PORT", "Value": "5432" },
+
+                            { "Name": "MB_DB_DBNAME", "Value": { "Ref": "DBName" } },
+                            { "Name": "GF_DATABASE_NAME", "Value": { "Ref": "DBName" } },
+
+                            { "Name": "JAVA_TIMEZONE", "Value": "UTC" }
+                            ], [] ] },
+                        "Secrets": { "Fn::If": [ "CreateDB", [
+                            { "Name": "MB_DB_USER"      , "ValueFrom": { "Fn::Sub": "${DBSecretSecrets}:username::" } },
+                            { "Name": "GF_DATABASE_USER", "ValueFrom": { "Fn::Sub": "${DBSecretSecrets}:username::" } },
+                            
+                            { "Name": "MB_DB_PASS"          , "ValueFrom": { "Fn::Sub": "${DBSecretSecrets}:password::" } },
+                            { "Name": "GF_DATABASE_PASSWORD", "ValueFrom": { "Fn::Sub": "${DBSecretSecrets}:password::" } },
+
+                            { "Name": "MB_DB_HOST"      , "ValueFrom": { "Fn::Sub": "${DBSecretSecrets}:host::" } },
+                            { "Name": "GF_DATABASE_HOST", "ValueFrom": { "Fn::Sub": "${DBSecretSecrets}:host::" } }
+                            ], [] ] }
+                    }
+                ]
+            }
+        },
+        "ECSCluster": {
+            "Type": "AWS::ECS::Cluster",
+            "Properties": {
+                "ClusterName": { "Fn::Sub": "${AWS::StackName}-Cluster" },
+                "CapacityProviders": [
+                    "FARGATE",
+                    "FARGATE_SPOT"
+                ],
+                "DefaultCapacityProviderStrategy": [
+                    {
+                        "CapacityProvider": "FARGATE",
+                        "Weight": 1
+                    },
+                    {
+                        "CapacityProvider": "FARGATE_SPOT",
+                        "Weight": 1
+                    }
+                ]
+            }
+        },
+        "ApplicationLoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            "Properties": {
+                "Name": { "Fn::Sub": "${AWS::StackName}-ALB" },
+                "Subnets": { "Ref": "SubnetIds" },
+                "SecurityGroups": [ { "Ref": "SecurityGroupALB" } ],
+                "Scheme": "internet-facing",
+                "LoadBalancerAttributes": [
+                    { "Key": "idle_timeout.timeout_seconds", "Value": "60" }
+                ]
+            }
+        },
+        "ALBTargetGroup": {
+            "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+            "Properties": {
+                "Name": { "Fn::Sub": "${AWS::StackName}-TG" },
+                "Port": 3000,
+                "Protocol": "HTTP",
+                "VpcId": { "Ref": "VpcId" },
+                "TargetType": "ip",
+                "HealthCheckPath": "/api/health",
+                "HealthCheckIntervalSeconds": 30,
+                "HealthCheckTimeoutSeconds": 5,
+                "HealthyThresholdCount": 2,
+                "UnhealthyThresholdCount": 2,
+                "TargetGroupAttributes": [
+                    {
+                        "Key": "deregistration_delay.timeout_seconds",
+                        "Value": "60"
+                    },
+                    {
+                        "Key": "slow_start.duration_seconds",
+                        "Value": "240"
+                    }
+                ]
+            }
+        },
+        "ALBListener": {
+            "Type": "AWS::ElasticLoadBalancingV2::Listener",
+            "Properties": {
+                "DefaultActions": [
+                    {
+                        "Type": "forward",
+                        "TargetGroupArn": { "Ref": "ALBTargetGroup" }
+                    }
+                ],
+                "LoadBalancerArn": { "Ref": "ApplicationLoadBalancer" },
+                "Port": 80,
+                "Protocol": "HTTP"
+            }
+        }
+    },
+    "Outputs": {
+        "ALBURL": {
+            "Description": "URL for the Application Load Balancer",
+            "Value": { "Fn::GetAtt": [ "ApplicationLoadBalancer", "DNSName" ] }
+        }
+    }
+}
